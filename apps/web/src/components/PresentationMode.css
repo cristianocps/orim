@@ -1,0 +1,151 @@
+.presentation-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
+.presentation-controls {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  pointer-events: auto;
+}
+
+.presentation-controls.top {
+  top: 0;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.4), transparent);
+}
+
+.presentation-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.frame-number {
+  font-size: 13px;
+  font-weight: 600;
+  color: white;
+  background: rgba(255, 255, 255, 0.2);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+}
+
+.frame-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: white;
+}
+
+.presentation-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.pres-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(8px);
+  border-radius: var(--radius);
+  color: white;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+.pres-action:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+.pres-action.active {
+  background: var(--accent);
+}
+
+.presentation-nav {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  padding: 0 16px;
+  pointer-events: auto;
+  transform: translateY(-50%);
+}
+
+.nav-arrow {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(8px);
+  color: white;
+  transition: all 0.15s;
+}
+.nav-arrow:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.3);
+}
+.nav-arrow:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.presentation-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.presentation-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: rgba(15, 23, 42, 0.9);
+  color: white;
+  pointer-events: auto;
+}
+
+.presentation-empty h2 {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.presentation-empty p {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.presentation-close-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  background: white;
+  color: var(--text-primary);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 500;
+  margin-top: 8px;
+}

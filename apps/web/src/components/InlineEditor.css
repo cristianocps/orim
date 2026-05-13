@@ -1,0 +1,20 @@
+.inline-editor-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  pointer-events: auto;
+}
+
+.inline-editor {
+  border: 2px solid #3b82f6;
+  border-radius: 4px;
+  padding: 4px 6px;
+  background: white;
+  outline: none;
+  resize: none;
+  box-shadow: 0 8px 30px rgba(15, 23, 42, 0.18);
+  color: #0f172a;
+  font-family: inherit;
+  line-height: 1.4;
+  text-align: center;
+}

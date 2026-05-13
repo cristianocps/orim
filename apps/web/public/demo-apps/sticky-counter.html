@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Contador de Post-its</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 24px;
+      min-height: 100vh;
+    }
+    h1 { font-size: 20px; margin-bottom: 16px; }
+    .stats {
+      background: #1e293b;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #334155;
+      font-size: 14px;
+    }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-value { font-weight: 600; color: #3b82f6; }
+    button {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      cursor: pointer;
+      width: 100%;
+      margin-bottom: 8px;
+    }
+    button:hover { background: #2563eb; }
+    button.secondary {
+      background: #334155;
+    }
+    button.secondary:hover { background: #475569; }
+    .info {
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 12px;
+    }
+  </style>
+</head>
+<body>
+  <h1>📊 Contador de Post-its</h1>
+
+  <div class="stats">
+    <div class="stat-row">
+      <span>Total de elementos</span>
+      <span class="stat-value" id="total">-</span>
+    </div>
+    <div class="stat-row">
+      <span>Post-its</span>
+      <span class="stat-value" id="stickies">-</span>
+    </div>
+    <div class="stat-row">
+      <span>Retângulos</span>
+      <span class="stat-value" id="rectangles">-</span>
+    </div>
+    <div class="stat-row">
+      <span>Textos</span>
+      <span class="stat-value" id="texts">-</span>
+    </div>
+  </div>
+
+  <button id="refresh">🔄 Atualizar contagem</button>
+  <button id="create" class="secondary">➕ Criar post-it de exemplo</button>
+  <button id="close" class="secondary">❌ Fechar app</button>
+
+  <p class="info" id="info">Inicializando…</p>
+
+  <script type="module">
+    // SDK inline para demo (em produção usaria @orim/app-sdk via npm)
+    let initPayload = null;
+    const pending = new Map();
+    let msgId = 0;
+
+    function post(msg) {
+      window.parent.postMessage(msg, '*');
+    }
+
+    window.addEventListener('message', (e) => {
+      const data = e.data;
+      if (data?.type === 'app:init') {
+        initPayload = data.payload;
+        document.getElementById('info').textContent = `Board: ${initPayload.boardId}`;
+        refreshStats();
+      }
+      if ('id' in data && pending.has(data.id)) {
+        pending.get(data.id).resolve(data.payload ?? data);
+        pending.delete(data.id);
+      }
+    });
+
+    function request(type, payload) {
+      const id = `msg-${++msgId}`;
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        post({ type, id, payload });
+        setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error('timeout')); } }, 5000);
+      });
+    }
+
+    async function getElements() {
+      return request('canvas:getElements');
+    }
+
+    async function createElement(el) {
+      return request('canvas:createElement', el);
+    }
+
+    async function getViewport() {
+      return request('canvas:getViewport');
+    }
+
+    function close() {
+      post({ type: 'app:close' });
+    }
+
+    async function refreshStats() {
+      try {
+        const elements = await getElements();
+        document.getElementById('total').textContent = elements.length;
+        document.getElementById('stickies').textContent = elements.filter(e => e.type === 'sticky_note').length;
+        document.getElementById('rectangles').textContent = elements.filter(e => e.type === 'rectangle').length;
+        document.getElementById('texts').textContent = elements.filter(e => e.type === 'text').length;
+      } catch (e) {
+        document.getElementById('info').textContent = 'Erro: ' + e.message;
+      }
+    }
+
+    document.getElementById('refresh').addEventListener('click', refreshStats);
+
+    document.getElementById('create').addEventListener('click', async () => {
+      try {
+        const vp = await getViewport();
+        const id = crypto.randomUUID();
+        await createElement({
+          id,
+          type: 'sticky_note',
+          transform: { x: vp.x + 100, y: vp.y + 100, rotation: 0, scaleX: 1, scaleY: 1 },
+          style: { fill: 0xfef3c7 },
+          metadata: {},
+          text: 'Criado pelo app!',
+          createdBy: 'app',
+          updatedAt: new Date().toISOString(),
+        });
+        refreshStats();
+      } catch (e) {
+        document.getElementById('info').textContent = 'Erro ao criar: ' + e.message;
+      }
+    });
+
+    document.getElementById('close').addEventListener('click', close);
+
+    // Notify parent that app is ready
+    post({ type: 'app:ready' });
+  </script>
+</body>
+</html>

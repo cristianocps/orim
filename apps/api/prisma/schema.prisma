@@ -1,0 +1,152 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  email     String   @unique
+  name      String
+  password  String
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ownedBoards Board[]       @relation("BoardOwner")
+  memberships BoardMember[]
+  elements    Element[]
+  history     History[]
+  apps        App[]
+  appInstalls AppInstall[]
+
+  @@map("users")
+}
+
+model Board {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  description String?
+  thumbnailUrl String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  ownerId String @db.Uuid
+  owner   User   @relation("BoardOwner", fields: [ownerId], references: [id])
+
+  members    BoardMember[]
+  elements   Element[]
+  history    History[]
+  appInstalls AppInstall[]
+
+  @@map("boards")
+}
+
+model BoardMember {
+  id     String @id @default(uuid()) @db.Uuid
+  role   BoardRole
+  joinedAt DateTime @default(now())
+
+  boardId String @db.Uuid
+  board   Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  userId  String @db.Uuid
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([boardId, userId])
+  @@map("board_members")
+}
+
+enum BoardRole {
+  owner
+  editor
+  viewer
+}
+
+model Element {
+  id        String   @id @default(uuid()) @db.Uuid
+  type      String
+  data      Json
+  transform Json
+  style     Json      @default("{}")
+  metadata  Json      @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  boardId String @db.Uuid
+  board   Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  createdBy String @db.Uuid
+  creator   User   @relation(fields: [createdBy], references: [id])
+
+  @@index([boardId])
+  @@index([boardId, deletedAt])
+  @@map("elements")
+}
+
+model History {
+  id        String   @id @default(uuid()) @db.Uuid
+  action    String
+  payload   Json
+  createdAt DateTime @default(now())
+
+  boardId String @db.Uuid
+  board   Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  userId  String @db.Uuid
+  user    User   @relation(fields: [userId], references: [id])
+
+  @@index([boardId, createdAt])
+  @@map("history")
+}
+
+model App {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  description String
+  iconUrl     String?
+  manifest    Json
+  published   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  authorId String @db.Uuid
+  author   User   @relation(fields: [authorId], references: [id])
+
+  versions    AppVersion[]
+  installs    AppInstall[]
+
+  @@map("apps")
+}
+
+model AppVersion {
+  id        String   @id @default(uuid()) @db.Uuid
+  version   String
+  entryPoint String
+  changelog String?
+  createdAt DateTime @default(now())
+
+  appId String @db.Uuid
+  app   App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, version])
+  @@map("app_versions")
+}
+
+model AppInstall {
+  id        String   @id @default(uuid()) @db.Uuid
+  config    Json     @default("{}")
+  enabled   Boolean  @default(true)
+  installedAt DateTime @default(now())
+
+  appId   String @db.Uuid
+  app     App    @relation(fields: [appId], references: [id])
+  boardId String @db.Uuid
+  board   Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  installedBy String @db.Uuid
+  installer   User   @relation(fields: [installedBy], references: [id])
+
+  @@unique([appId, boardId])
+  @@map("app_installs")
+}

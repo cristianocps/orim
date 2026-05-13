@@ -1,0 +1,131 @@
+.properties-panel {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.prop-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.prop-header strong {
+  text-transform: capitalize;
+  font-size: 13px;
+}
+
+.prop-count {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.prop-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.prop-group-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.prop-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.prop-row.column {
+  flex-direction: column;
+  align-items: stretch;
+}
+.prop-row label {
+  font-size: 12px;
+  color: #64748b;
+  flex-shrink: 0;
+  min-width: 80px;
+}
+.prop-row input[type='text'],
+.prop-row input[type='number'],
+.prop-row select,
+.prop-row textarea {
+  flex: 1;
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: white;
+  color: #1e293b;
+}
+.prop-row input[type='range'] {
+  flex: 1;
+  width: 100%;
+}
+.prop-row input[type='color'] {
+  width: 32px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+}
+.prop-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.prop-value-tag {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.prop-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.prop-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  background: #f1f5f9;
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: #1e293b;
+}
+.prop-tag button {
+  background: none;
+  border: none;
+  font-size: 13px;
+  line-height: 1;
+  color: #94a3b8;
+  cursor: pointer;
+}
+.prop-tag button:hover {
+  color: #ef4444;
+}
+.prop-tags input {
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 12px;
+  color: #1e293b;
+  flex: 1;
+  min-width: 60px;
+}
+
+.panel-empty {
+  color: #94a3b8;
+  text-align: center;
+  font-size: 12px;
+  padding: 24px;
+}

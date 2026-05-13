@@ -1,0 +1,55 @@
+.app-sandbox-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.app-sandbox-container {
+  background: #1e293b;
+  border-radius: 12px;
+  width: 90vw;
+  max-width: 960px;
+  height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+
+.app-sandbox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #334155;
+}
+
+.app-sandbox-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: #e2e8f0;
+}
+
+.app-sandbox-close {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 22px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.app-sandbox-close:hover {
+  color: #e2e8f0;
+}
+
+.app-sandbox-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: white;
+}
