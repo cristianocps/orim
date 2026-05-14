@@ -1,5 +1,6 @@
 import { CheckCircle2, Flag, Tag, User, Pencil, FileText } from 'lucide-react';
 import type { ContextActionProvider } from '../types.js';
+import type { CanvasElement } from '@orim/shared';
 
 const STATUSES = [
   { value: 'todo', label: 'A fazer' },
@@ -14,26 +15,57 @@ const PRIORITIES = [
   { value: 'high', label: 'Alta' },
 ] as const;
 
+/**
+ * Card title and description used to be inline string fields on the card
+ * element. They're now child `text` elements (positions 0 and 1 in
+ * creation order — see `insertElementAt('card')` in the engine). This
+ * provider delegates reads/writes to those children: editor actions
+ * select+edit the right child, and the properties panel reads/patches
+ * the child's `.text` field directly.
+ */
+function getTextChildren(card: CanvasElement, store: { getChildren: (id: string) => CanvasElement[] }): {
+  title: CanvasElement | null;
+  description: CanvasElement | null;
+} {
+  const children = store.getChildren(card.id).filter((c) => c.type === 'text');
+  return {
+    title: children[0] ?? null,
+    description: children[1] ?? null,
+  };
+}
+
 export const cardProvider: ContextActionProvider = {
   id: 'card',
   types: ['card'],
   actions: ({ primary, store }) => {
     if (!primary || primary.type !== 'card') return [];
     const card = primary as any;
+    const { title, description } = getTextChildren(primary, store);
     return [
       {
         id: 'card.editTitle',
         label: 'Editar título',
         icon: Pencil,
         group: 'content',
-        run: ({ engine }) => engine.beginInlineEdit(primary.id, { field: 'title' }),
+        run: ({ engine }) => {
+          if (!title) return;
+          // Selecting BEFORE opening the editor keeps the toolbar pinned
+          // to the title node so font/color/bold actions hit the right
+          // element while the user types.
+          store.setSelectedIds([title.id]);
+          engine.beginInlineEdit(title.id);
+        },
       },
       {
         id: 'card.editDescription',
         label: 'Editar descrição',
         icon: FileText,
         group: 'content',
-        run: ({ engine }) => engine.beginInlineEdit(primary.id, { field: 'description' }),
+        run: ({ engine }) => {
+          if (!description) return;
+          store.setSelectedIds([description.id]);
+          engine.beginInlineEdit(description.id);
+        },
       },
       {
         id: 'card.status',
@@ -89,25 +121,30 @@ export const cardProvider: ContextActionProvider = {
       },
     ];
   },
-  properties: ({ primary, patch }) => {
+  properties: ({ primary, patch, store }) => {
     if (!primary || primary.type !== 'card') return [];
     const card = primary as any;
+    const { title, description } = getTextChildren(primary, store);
     return [
       {
         id: 'card.title',
         label: 'Título',
         type: 'text',
         group: 'content',
-        get: () => card.title ?? '',
-        set: (_, v) => patch(primary.id, { title: String(v) } as any),
+        get: () => (title as any)?.text ?? '',
+        set: (_, v) => {
+          if (title) patch(title.id, { text: String(v) } as any);
+        },
       },
       {
         id: 'card.description',
         label: 'Descrição',
         type: 'textarea',
         group: 'content',
-        get: () => card.description ?? '',
-        set: (_, v) => patch(primary.id, { description: String(v) } as any),
+        get: () => (description as any)?.text ?? '',
+        set: (_, v) => {
+          if (description) patch(description.id, { text: String(v) } as any);
+        },
       },
       {
         id: 'card.status',

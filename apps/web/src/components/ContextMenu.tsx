@@ -47,7 +47,7 @@ const SECTION_LABELS: Partial<Record<ContextAction['group'], string>> = {
 };
 
 export function ContextMenu({ engine, open, onClose }: ContextMenuProps) {
-  const { selectedIds, primarySelectionId, getElement, addElement, updateElement, removeElement, setSelectedIds, getElements } =
+  const { selectedIds, primarySelectionId, getElement, addElement, updateElement, removeElement, setSelectedIds, getElements, getChildren } =
     useBoardStore();
   const ref = useRef<HTMLDivElement>(null);
 
@@ -62,9 +62,9 @@ export function ContextMenu({ engine, open, onClose }: ContextMenuProps) {
       selection,
       primary,
       engine,
-      store: { addElement, updateElement, removeElement, setSelectedIds, getElement, getElements },
+      store: { addElement, updateElement, removeElement, setSelectedIds, getElement, getElements, getChildren },
     };
-  }, [engine, open, selectedIds, primarySelectionId, getElement, addElement, updateElement, removeElement, setSelectedIds, getElements]);
+  }, [engine, open, selectedIds, primarySelectionId, getElement, addElement, updateElement, removeElement, setSelectedIds, getElements, getChildren]);
 
   const resolved = useMemo(() => {
     if (!ctx) return null;

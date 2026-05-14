@@ -14,6 +14,7 @@ export const frameProvider: ContextActionProvider = {
   types: ['frame'],
   actions: ({ primary, store }) => {
     if (!primary || primary.type !== 'frame') return [];
+    const titleChild = store.getChildren(primary.id).find((c) => c.type === 'text');
     return [
       {
         id: 'frame.rename',
@@ -21,7 +22,11 @@ export const frameProvider: ContextActionProvider = {
         icon: Pencil,
         shortcut: 'Enter',
         group: 'content',
-        run: ({ engine }) => engine.beginInlineEdit(primary.id),
+        run: ({ engine }) => {
+          if (!titleChild) return;
+          store.setSelectedIds([titleChild.id]);
+          engine.beginInlineEdit(titleChild.id);
+        },
       },
       {
         id: 'frame.preset',
@@ -47,16 +52,19 @@ export const frameProvider: ContextActionProvider = {
       },
     ];
   },
-  properties: ({ primary, patch }) => {
+  properties: ({ primary, patch, store }) => {
     if (!primary || primary.type !== 'frame') return [];
+    const titleChild = store.getChildren(primary.id).find((c) => c.type === 'text');
     return [
       {
         id: 'frame.title',
         label: 'Título',
         type: 'text',
         group: 'content',
-        get: () => (primary as any).title ?? 'Frame',
-        set: (_, v) => patch(primary.id, { title: String(v) } as any),
+        get: () => (titleChild as any)?.text ?? '',
+        set: (_, v) => {
+          if (titleChild) patch(titleChild.id, { text: String(v) } as any);
+        },
       },
       {
         id: 'frame.width',

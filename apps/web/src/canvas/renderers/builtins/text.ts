@@ -3,7 +3,16 @@ import type { ElementRenderer } from '../types.js';
 
 export const renderText: ElementRenderer = (el) => {
   const container = new Container();
-  const text = (el as any).text ?? 'Texto';
+  // Default to '' (NOT to a placeholder string like 'Texto') when the
+  // element has no text. The InlineEditor uses the same `?? ''` fallback
+  // to compute its initialValue — the two MUST agree, otherwise opening
+  // and closing the editor without typing would commit '' over a model
+  // that displayed 'Texto' as a renderer-side placeholder, and the
+  // visible text would "disappear". The factory (`insertElementAt`) and
+  // the migration script both seed `text: ''` explicitly, so legitimate
+  // empty texts render as empty (and a top-level text element seeds
+  // `text: 'Texto'` in its model so the user sees that).
+  const text = (el as any).text ?? '';
   // Allow fontSize from either the top-level legacy field or the shared
   // `style.fontSize` so the unified textFormatProvider can drive both.
   const fontSize = (el as any).fontSize ?? (el.style?.fontSize as number | undefined) ?? 24;
@@ -12,6 +21,12 @@ export const renderText: ElementRenderer = (el) => {
   const fontWeight = (el.style?.fontWeight as string) ?? '500';
   const fontStyle = (el.style?.fontStyle as 'normal' | 'italic') ?? 'normal';
   const align = (el.style?.align as 'left' | 'center' | 'right') ?? 'left';
+  // wordWrapWidth is computed by the engine from the parent shape's inner
+  // box (see `computeChildTextLayout`). When present, the text wraps to fit
+  // — without this, long sticky/card content overflows the shape and
+  // becomes unreadable. Top-level text elements (no parent) typically
+  // leave it unset and grow naturally.
+  const wordWrapWidth = (el as any).wordWrapWidth as number | undefined;
 
   const txt = new Text({
     text,
@@ -22,6 +37,12 @@ export const renderText: ElementRenderer = (el) => {
       fontStyle,
       align,
       fill: color,
+      wordWrap: wordWrapWidth !== undefined && wordWrapWidth > 0,
+      wordWrapWidth: wordWrapWidth ?? 0,
+      // Without `breakWords`, a single very long word (a URL, a hash, an
+      // unbroken table key) blows past `wordWrapWidth` and overflows the
+      // parent. Breaking mid-word keeps the rendered text inside the box.
+      breakWords: true,
     }),
   });
   txt.anchor.set(0.5);

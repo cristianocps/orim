@@ -33,6 +33,24 @@ interface BoardState {
   setViewport: (v: ViewportState) => void;
   getElement: (id: string) => CanvasElement | null;
   getElements: () => CanvasElement[];
+  /**
+   * Direct children of the given element (one level deep). The store keeps
+   * elements as a flat array; these helpers recompute the tree on read.
+   * Cheap because boards rarely exceed a few hundred elements.
+   */
+  getChildren: (parentId: string) => CanvasElement[];
+  /**
+   * Walk up to the topmost ancestor (the "root" of the selection tree).
+   * Used by Figma-style selection: a single click on a child resolves to
+   * its root before highlighting.
+   */
+  getRoot: (id: string) => CanvasElement | null;
+  /**
+   * All descendants (children + grand-children + ...). Used for cascade
+   * delete on the engine so leaving the parent visually removes everything
+   * inside it without orphaning rows.
+   */
+  getDescendants: (id: string) => CanvasElement[];
   undo: () => void;
   redo: () => void;
   canUndo: () => boolean;
@@ -139,6 +157,45 @@ export const useBoardStore = create<BoardState>((set, get) => ({
 
   getElement: (id) => get().elements.find((e) => e.id === id) ?? null,
   getElements: () => get().elements,
+
+  getChildren: (parentId) => get().elements.filter((e) => e.parentId === parentId),
+
+  getRoot: (id) => {
+    const elements = get().elements;
+    const byId = new Map(elements.map((e) => [e.id, e] as const));
+    let current = byId.get(id) ?? null;
+    // Defensive: if a cycle ever sneaks in (shouldn't), bail after a
+    // generous number of hops instead of looping.
+    for (let i = 0; i < 64 && current?.parentId; i++) {
+      const next = byId.get(current.parentId);
+      if (!next || next.id === current.id) break;
+      current = next;
+    }
+    return current;
+  },
+
+  getDescendants: (id) => {
+    const elements = get().elements;
+    const byParent = new Map<string, CanvasElement[]>();
+    for (const e of elements) {
+      if (!e.parentId) continue;
+      const list = byParent.get(e.parentId);
+      if (list) list.push(e);
+      else byParent.set(e.parentId, [e]);
+    }
+    const out: CanvasElement[] = [];
+    const stack: string[] = [id];
+    while (stack.length > 0) {
+      const next = stack.pop()!;
+      const kids = byParent.get(next);
+      if (!kids) continue;
+      for (const k of kids) {
+        out.push(k);
+        stack.push(k.id);
+      }
+    }
+    return out;
+  },
 
   undo: () => {
     const { history, engine } = get();

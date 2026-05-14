@@ -6,7 +6,7 @@
 
 ## Last Updated
 
-2026-05-13 (inline editor: removido backdrop que impedia abrir editor em outros elementos)
+2026-05-14 (No-op commits do InlineEditor + alinhamento renderer/editor para `text` undefined)
 
 ---
 
@@ -34,6 +34,123 @@ Orim is a **collaborative whiteboard platform** built as a Turborepo monorepo. T
 ---
 
 ## Recent Fixes & Decisions
+
+### 0.17. No-op commits no InlineEditor + alinhamento de fallback `text` undefined (2026-05-14)
+
+**Sintoma reportado:** "se entrar em modo de edição do texto e sair sem digitar nada o texto antigo some". Reproduz com qualquer text element cuja propriedade `text` esteja `undefined` no model (em vez de `''`).
+
+**Causa raiz: semânticas divergentes pra `text === undefined`.**
+- `renderText` desenhava `(el as any).text ?? 'Texto'` — usuário enxergava o placeholder "Texto" no canvas.
+- `engine.beginInlineEdit` calculava `initialValue = el.text ?? ''` — editor abria vazio.
+
+Quando o usuário dava double-click, abria o editor (vazio), saía sem digitar, e o `onBlur` disparava `commit('')`. O engine fazia `updateElement(textChild, { text: '' })`, persistia, e o renderer agora desenhava `''` (porque `'' ?? 'Texto' === ''` — o `??` só substitui `null/undefined`). Resultado: o "texto antigo" (que era na verdade um placeholder de renderer) sumia.
+
+**Correção em duas camadas (defensive + raiz).**
+
+1. **InlineEditor agora skipa commits no-op.** Se `value === (request.initialValue ?? '')` o componente chama `engine.endInlineEdit(false)` (cancel) em vez de `endInlineEdit(true, value)`. Isso protege contra QUALQUER divergência futura entre o que o renderer mostra e o que o editor lê — abrir e fechar sem digitar nunca mais escreve nada. Também economiza um round-trip de PATCH.
+2. **`renderText` usa `text ?? ''`** (alinhado com `beginInlineEdit`). O placeholder "Texto" só aparece quando ele é literalmente o `text` no model — que é o que `insertElementAt('text')` semeia para text elements top-level.
+
+**Lição genérica:** **Renderers e editores DEVEM compartilhar a mesma função de derivação para qualquer campo editável.** Idealmente expor um helper único (`getDisplayedText(el)`) que ambos consomem; até lá, o "skip-no-op-commit" no editor é a salvaguarda definitiva contra a classe inteira de bugs do tipo "abro e fecho e algo muda".
+
+**Arquivos:** `apps/web/src/components/InlineEditor.tsx`, `apps/web/src/canvas/renderers/builtins/text.ts`.
+
+### 0.16. Auto-fit do texto ao shape pai (wordWrap + fontSize cascateado no resize) (2026-05-14)
+
+**Sintoma reportado:** "o sizing do elemento de texto deveria ser adaptado ao tamanho do elemento pai (por padrão) pois está bem difícil de visualizar". Após o refactor 0.14 (texto como sub-componente), o text child tinha `fontSize` fixo do model e SEM `wordWrap` — então qualquer sticky/card/frame redimensionado deixava o texto minúsculo no meio de um shape enorme, e textos longos extrapolavam o shape sem quebrar linha.
+
+**Decisão de design.** Em vez de o renderer de `text` consultar o parent (que viola o princípio de renderers serem puramente derivados de `el`), o engine virou source-of-truth do layout dos children. Cada text child carrega um `metadata.layoutRole` enumerado (`sticky.center`, `rectangle.center`, `circle.center`, `frame.title`, `card.title`, `card.description`) e o engine converte essa role + o size atual do parent em três coisas: `wordWrapWidth` (largura útil do shape menos padding), `transform.x/y` (posição local), e — só quando o resize aciona — um novo `fontSize` proporcional à razão de crescimento.
+
+**Implementação.**
+
+- **`computeChildTextLayout(parent, child)`** no `engine.ts`: retorna o patch de layout (wrap + posição) baseado no role. Inferência de role pra elementos legados (sem `metadata.layoutRole`, criados pela migration `migrate-text-to-children`) via tipo do parent + ordem dos siblings (card title vs description).
+- **`relayoutTextChildren(parentId, fontRatio)`**: itera os direct children type=text e aplica `computeChildTextLayout` + escala fontSize (clampado em [8, 96]) usando o `fontRatio` que o caller passa.
+- **`endResize`**: calcula `fontRatio = min(width_ratio, height_ratio)` (ou `newRadius/startRadius` pra circles) e chama `relayoutTextChildren(parentId, fontRatio)`. Resultado: redimensionar um sticky 2× maior também aumenta o texto 2× (até o cap de 96px).
+- **`insertElementAt`**: cada text child criado já leva `metadata.layoutRole` e o layout inicial é aplicado ANTES do `engine.createElement` pra evitar flash de "texto na origem sem wrap".
+- **`applyInitialChildLayouts()`** + chamada em `BoardEditorPage` após o load: re-fita todos os text children de todos os pais (com `skipEmit: true` pra não saturar a API). Isso garante que boards legados rendam bonito de cara, sem o usuário precisar redimensionar nada.
+- **Renderer de texto** (`renderText`): passa `wordWrap: wordWrapWidth > 0`, `wordWrapWidth`, `breakWords: true` (pra URLs/hashes longos não vazarem o shape).
+- **Persistência:** `wordWrapWidth` mora no top-level do model → `extractData` joga em `data.wordWrapWidth` no DB → `flattenElement` reconstrói no top-level. `metadata.layoutRole` viaja no campo `metadata`. Sem mudança de schema.
+
+**Defaults atualizados:**
+- Sticky: 16→18px
+- Rectangle/Circle: 14→18px (eram especialmente difíceis de ler — fundo colorido com texto branco minúsculo)
+- Card title: 15→16px
+- Card description: 12→13px
+
+**Limite conhecido:** Cards têm dois text children fixos (title + description) sem layout flow real. Adicionar um terceiro text child a um card "manualmente" via API ficaria sem role inferido — fica como extensão futura se a gente abrir a composição de elementos arbitrária.
+
+**Arquivos:** `apps/web/src/canvas/engine.ts`, `apps/web/src/canvas/renderers/builtins/text.ts`, `apps/web/src/pages/BoardEditorPage.tsx`.
+
+### 0.15. Pixi v8 event pooling: flag de evento "viajando" entre dispatches (2026-05-14)
+
+**Sintoma reportado:** "após editar um texto em um elemento, não conseguimos editar o texto de nenhum outro" — segunda regressão do mesmo padrão (a primeira foi o backdrop do `InlineEditor`).
+
+**Causa raiz.** Pixi v8 reusa instâncias de `FederatedPointerEvent` via pool interno (`EventBoundary`) para evitar GC pressure em alta frequência de input. A primeira fix de double-click marcava `(e as any).__orimInlineEditHandled = true` para de-dupar a coalescência do path manual (`pointerdown` timer 500ms) com o path nativo (`pointertap` com `e.detail >= 2`). Como o evento é o MESMO objeto reciclado em dispatches subsequentes, a flag persistia indefinidamente — o próximo `tryBeginInlineEdit` (em outro elemento, outro dia, outro mundo) abortava com "já handled".
+
+Sequência observada:
+
+1. `dblclick` no sticky A → `tryBeginInlineEdit` marca o evento, edita.
+2. Pixi devolve o objeto de evento ao pool.
+3. Próximo `dblclick` em sticky B → Pixi pega esse objeto do pool, **sem limpar a propriedade ad-hoc**, e despacha.
+4. `tryBeginInlineEdit` vê `__orimInlineEditHandled = true` herdado do dispatch anterior → return early → editor nunca abre.
+
+**Correção.** Substituí a flag por uma janela temporal global no engine (`lastInlineEditAttemptAt: number`). 120ms é menor que o gap humano entre dois dblclicks consecutivos (qualquer coisa < 200ms é uma sequência só) mas maior que o intervalo entre o `pointerdown` manual e o `pointertap` nativo que seguem (acontecem no mesmo frame). Resultado: a coalescência continua funcionando dentro do mesmo dblclick e o próximo dblclick passa limpo.
+
+**Lição genérica:** **NUNCA** anexar propriedades custom em objetos `FederatedPointerEvent` no Pixi v8 — eles são reciclados. Para de-duplicar handlers que disparam para o mesmo input, use timestamp window, contadores, ou `WeakRef`-style identificadores que naturalmente expiram.
+
+**Arquivos:** `apps/web/src/canvas/engine.ts`.
+
+### 0.14. Texto como sub-componente: hierarquia parent/child em todo shape com texto (2026-05-14)
+
+**Pedido do usuário:** "se considerarmos que cada elemento que pode ter o texto editado ao invés de ser o texto diretamente tem um componente de texto? isso por natureza nos trará o editor com mais funcionalidades e edição inline".
+
+**Mudança arquitetural.** Shapes editáveis (sticky_note, rectangle, circle, card, frame) **deixaram de carregar texto inline em campos próprios** (`text`/`title`/`description`). Cada um agora tem um (ou mais) `text` element como **filho** numa árvore parent/child. Isso unifica:
+
+- O renderer de texto único (`renderText`) atende todos os casos de edição.
+- Inline editor + format toolbar operam sempre num `text` element real.
+- Cards ganham 2 children (title + description); frames 1 (title); sticky/rect/circle 1; tudo com bounds, fonte, cor, alinhamento gerenciados por `style.*` no próprio child.
+
+**Schema Prisma + migration.** Adicionada coluna `parentId UUID?` em `elements` com FK self-relation `ElementChildren` (`onDelete: SetNull`, cascade no app layer) + index `parentId_idx`. Migração `20260514005550_element_parentid_hierarchy`. Tipos compartilhados (`@orim/shared`) já tinham `BaseElement.parentId`.
+
+**Backend.** `BoardsService.patchElements` aceita `parentId` no Zod schema (`null` desanexa, `undefined` mantém) e ordena ops por dependência de pai (`sortByParentDependency`) antes da `$transaction` para satisfazer a FK quando shape + child chegam no mesmo batch. `deleteElement` faz cascade soft-delete coletando descendentes BFS (cap 10 níveis). `findOne` ordena `parentId NULLS FIRST, createdAt ASC` para garantir que pais carregam antes dos filhos no boot do canvas.
+
+**Frontend (engine).** Três acréscimos centrais:
+
+1. `createElement(el)` — se `el.parentId` referencia um container já montado, anexa **dentro** dele (em vez de `elementsContainer`). Pixi compõe transforms automaticamente: arrastar/redimensionar o pai carrega os filhos; `child.transform.x/y` é interpretado como **local** ao pai. Children que chegam ANTES do pai ficam orphan e são reconectados via `reparentOrphans()` quando o pai monta.
+2. `deleteElement(id)` cascateia: coleta descendentes do `elementModels`, deleta deepest-first, cada um emitindo seu próprio `element.deleted` para que `useBoardSync` persista individualmente.
+3. `rebuildElementVisual(id)` agora destrói **somente** o visual do renderer (taggeado `__rendererVisual = true` e armazenado em `(c as any).__visual`). Sem isso, qualquer `updateElement` no pai (ex: trocar a cor do sticky) destruía os children Pixi junto, partindo a hierarquia silenciosamente.
+
+**Frontend (drag e selection — Figma-style).**
+
+- **Drag** só inicia para containers em `elementsContainer` (top-level). Filhos não draggam isoladamente — eles seguem o pai pela hierarquia Pixi. Sem essa filtragem, o delta calculado em world coords seria aplicado em local coords do pai, multiplicando por qualquer transform composto.
+- **Single-click** chama `resolveSelectionRoot(id)` antes de selecionar — clicar no texto de um sticky seleciona o sticky inteiro, não o text node. Idem para context menu, connector mode e shift-select.
+- **Double-click** (já tratado em `tryBeginInlineEdit`) procura o primeiro descendente type='text' do alvo e abre o editor lá. Antes de abrir, **muda a seleção para o text child** para que a barra de formatação (textFormatProvider) opere no nó correto.
+- **Após `endInlineEdit`** a seleção volta automaticamente para o root original — usuário sai da edição já com o pai selecionado de novo, pronto para arrastar.
+
+**Frontend (renderers).** `stickyNote`, `rectangle`, `circle`, `frame`, `card` viraram **puro shape** — não desenham mais texto interno nem expõem `__inlineEditor` próprio. O motor delega via `findTextDescendant`. Comportamento visual idêntico para o usuário porque a factory abaixo cria os children com mesmas posições/cores/tamanhos que os renderers usavam antes.
+
+**Frontend (factory).** `engine.insertElementAt(type, ...)` agora cria o pai E os children numa única chamada (children rodam `engine.createElement(ch)` DEPOIS do pai para que o `parentContainer` exista no `elementMap`). Defaults:
+
+| Tipo | Children criados |
+|---|---|
+| `sticky_note` | 1 text, fontSize 16, color slate-900 |
+| `rectangle`, `circle` | 1 text, fontSize 14, white |
+| `frame` | 1 text no titlebar (offsetY = -halfH+13), fontSize 13, slate-600, weight 600 |
+| `card` | 2 texts: title (offsetY = -halfH+50, fontSize 15, slate-900, weight 600, align left) + description (offsetY = -halfH+90, fontSize 12, slate-500, align left) |
+
+**Frontend (providers).** `cardProvider` lê title/description via `store.getChildren(card.id).filter(c => c.type === 'text')` — `[0]` = title, `[1]` = description. Actions "Editar título"/"Editar descrição" e propriedades correspondentes operam no child id, não mais no card. `frameProvider`, `stickyProvider` idem para seu único text child. `BoardStoreApi` ganhou `getChildren(parentId)` e o store implementa via filtro O(n) (boards têm centenas de elementos, não milhares).
+
+**Migration de dados existentes.** Script `apps/api/prisma/scripts/migrate-text-to-children.ts` percorre todos os shapes legados, extrai `text`/`title`/`description` do JSON `data`, cria child text elements e limpa o data. Idempotente (skip se já existem children text). Rodei contra dev DB: 26 shapes processados, 26 children criados.
+
+```bash
+pnpm --filter @orim/api exec tsx prisma/scripts/migrate-text-to-children.ts
+```
+
+**Limites conhecidos / dívida.**
+
+- Children não escalam proporcionalmente quando o pai redimensiona — eles ficam ancorados no offset original (Figma faria isso com constraints; v1 vive sem). Sticky/rect/circle nem sentem porque o text fica no centro (0,0); cards e frames podem precisar reposicionar text se o size mudar muito.
+- `sticky.toCard` (transformar sticky em card) não move/reparenta o text child existente — ele continua filho do mesmo nó (que agora é card). Visualmente o card vai ter o texto do sticky no offset 0,0 em vez de no slot title. Aceitei como trade-off; refinar quando alguém usar.
+- Dragging de texto child individualmente (caso "entrei no nível filho") está desativado por enquanto — a v1 mantém Figma-strict ("clique = pai").
+- Nenhum rich-text ainda — cada text element formata o nó inteiro com `style.fontWeight`, `style.color`, etc. Para runs (negrito numa palavra só), trocar `<textarea>` por TipTap/Lexical num próximo passo.
 
 ### 0.13. InlineEditor: backdrop comia o clique de transição entre elementos (2026-05-13)
 

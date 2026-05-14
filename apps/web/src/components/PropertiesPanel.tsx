@@ -30,6 +30,7 @@ export function PropertiesPanel({ engine }: PropertiesPanelProps) {
     removeElement,
     setSelectedIds,
     getElements,
+    getChildren,
   } = useBoardStore();
 
   const ctx: PropertiesContext | null = useMemo(() => {
@@ -42,10 +43,10 @@ export function PropertiesPanel({ engine }: PropertiesPanelProps) {
       selection,
       primary,
       engine,
-      store: { addElement, updateElement, removeElement, setSelectedIds, getElement, getElements },
+      store: { addElement, updateElement, removeElement, setSelectedIds, getElement, getElements, getChildren },
       patch: (id, patch) => updateElement(id, patch),
     };
-  }, [engine, selectedIds, primarySelectionId, getElement, addElement, updateElement, removeElement, setSelectedIds, getElements]);
+  }, [engine, selectedIds, primarySelectionId, getElement, addElement, updateElement, removeElement, setSelectedIds, getElements, getChildren]);
 
   const fields = useMemo(() => (ctx ? contextActionRegistry.resolveProperties(ctx) : []), [ctx]);
 

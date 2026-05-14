@@ -81,8 +81,21 @@ model Element {
   createdBy String @db.Uuid
   creator   User   @relation(fields: [createdBy], references: [id])
 
+  // Parent/child hierarchy. Used so shape elements (sticky_note, rectangle,
+  // circle, card, frame, table) don't carry text inline anymore — they own
+  // child `text` elements instead. This unifies inline editing (always on
+  // text elements), enables multi-text composites (a card with title +
+  // description = 1 shape + 2 text children), and lets the engine reuse a
+  // single text renderer everywhere. Self-relation with SET NULL on delete
+  // so we can detach orphans before cascading at the application layer
+  // (see BoardsService.deleteElement, which does an explicit cascade).
+  parentId String? @db.Uuid
+  parent   Element? @relation("ElementChildren", fields: [parentId], references: [id], onDelete: SetNull)
+  children Element[] @relation("ElementChildren")
+
   @@index([boardId])
   @@index([boardId, deletedAt])
+  @@index([parentId])
   @@map("elements")
 }
 

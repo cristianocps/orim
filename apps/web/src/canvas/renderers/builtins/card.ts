@@ -21,11 +21,20 @@ const priorityColors: Record<string, number> = {
   high: 0xef4444,
 };
 
+/**
+ * Renders the card chrome (background, status badge + label, priority
+ * dot, tag chips, assignee avatar). Title and description are now
+ * separate child `text` elements parented to this card — the engine
+ * positions them at the top (title) and middle (description) when the
+ * card is created via `insertElementAt('card')`.
+ *
+ * This separation lets each text node carry its own formatting (font
+ * size, weight, color, bold/italic) through the shared format toolbar
+ * and editor, instead of the card duplicating that handling internally.
+ */
 export const renderCard: ElementRenderer = (el) => {
   const container = new Container();
   const size = (el as any).size ?? { width: 260, height: 160 };
-  const title = (el as any).title ?? 'Tarefa';
-  const description = (el as any).description ?? '';
   const status = (el as any).status ?? 'todo';
   const priority = (el as any).priority ?? 'medium';
   const tags: string[] = (el as any).tags ?? [];
@@ -51,35 +60,6 @@ export const renderCard: ElementRenderer = (el) => {
   statusTxt.anchor.set(0, 0.5);
   statusTxt.position.set(-size.width / 2 + 22, -size.height / 2 + 21);
   container.addChild(statusTxt);
-
-  const titleTxt = new Text({
-    text: title,
-    style: new TextStyle({
-      fontSize: 15,
-      fontWeight: '600',
-      fill: 0x1e293b,
-      wordWrap: true,
-      wordWrapWidth: size.width - 28,
-    }),
-  });
-  titleTxt.anchor.set(0, 0);
-  titleTxt.position.set(-size.width / 2 + 14, -size.height / 2 + 38);
-  container.addChild(titleTxt);
-
-  if (description) {
-    const descTxt = new Text({
-      text: description.length > 90 ? description.slice(0, 90) + '…' : description,
-      style: new TextStyle({
-        fontSize: 12,
-        fill: 0x64748b,
-        wordWrap: true,
-        wordWrapWidth: size.width - 28,
-      }),
-    });
-    descTxt.anchor.set(0, 0);
-    descTxt.position.set(-size.width / 2 + 14, -size.height / 2 + 70);
-    container.addChild(descTxt);
-  }
 
   const priorityG = new Graphics();
   priorityG.circle(size.width / 2 - 18, -size.height / 2 + 20, 5);
@@ -116,47 +96,6 @@ export const renderCard: ElementRenderer = (el) => {
     avTxt.position.set(size.width / 2 - 18, size.height / 2 - 18);
     container.addChild(avTxt);
   }
-
-  // Two editable regions: title (top) and description (middle). The engine
-  // picks based on dblclick world position; a fallback FloatingToolbar
-  // action ("Edit description") can target a specific field by name.
-  const titleBounds = {
-    x: -size.width / 2 + 8,
-    y: -size.height / 2 + 36,
-    width: size.width - 36,
-    height: 24,
-  };
-  const descBounds = {
-    x: -size.width / 2 + 8,
-    y: -size.height / 2 + 66,
-    width: size.width - 16,
-    height: size.height - 100,
-  };
-  const editors = [
-    {
-      field: 'title' as const,
-      label: 'Título',
-      multiline: false,
-      fontSize: 15,
-      padding: 4,
-      bounds: titleBounds,
-      color: '#1e293b',
-      background: '#ffffff',
-    },
-    {
-      field: 'description' as const,
-      label: 'Descrição',
-      multiline: true,
-      fontSize: 12,
-      padding: 4,
-      bounds: descBounds,
-      color: '#64748b',
-      background: '#ffffff',
-    },
-  ];
-  (container as any).__inlineEditors = editors;
-  // Default editor (used when neither field nor worldPoint matches a region).
-  (container as any).__inlineEditor = editors[0];
 
   return container;
 };

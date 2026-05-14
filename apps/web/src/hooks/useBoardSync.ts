@@ -96,6 +96,10 @@ export function useBoardSync(
             transform: e.transform,
             style: e.style ?? {},
             metadata: e.metadata ?? {},
+            // Persist parent/child link. `null` is a valid value (detach)
+            // so we send it when explicitly set; `undefined` is dropped so
+            // we don't accidentally re-parent on a transform-only patch.
+            ...(e.parentId !== undefined ? { parentId: e.parentId } : {}),
           };
         }).filter(Boolean) as any[];
         if (ops.length > 0) {

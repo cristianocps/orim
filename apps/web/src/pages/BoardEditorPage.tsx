@@ -169,6 +169,12 @@ export function BoardEditorPage() {
         for (const el of elements.filter((e) => e.type === 'connector')) {
           engine.createElement(el, { skipEmit: true });
         }
+        // Re-fit text children of every shape now that all elements are
+        // mounted. Necessary because legacy boards (pre-`layoutRole`)
+        // store text without `wordWrapWidth`, so without this they
+        // render with no wrap and overflow the parent until the user
+        // manually resizes. `skipEmit: true` avoids hammering the API.
+        engine.applyInitialChildLayouts();
         setReady(true);
       })
       .catch((e) => {

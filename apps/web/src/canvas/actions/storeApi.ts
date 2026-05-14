@@ -9,4 +9,9 @@ export interface BoardStoreApi {
   setSelectedIds: (ids: string[]) => void;
   getElement: (id: string) => CanvasElement | null;
   getElements: () => CanvasElement[];
+  /** Direct children of the given element (one level). Used by composite
+   *  providers (card title/description, frame title) that delegate text
+   *  reads/writes to a child text element instead of holding the field
+   *  inline. */
+  getChildren: (parentId: string) => CanvasElement[];
 }

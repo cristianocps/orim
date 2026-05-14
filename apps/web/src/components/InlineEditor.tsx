@@ -30,7 +30,19 @@ export function InlineEditor({ engine, request, onClose }: InlineEditorProps) {
   if (!request || !engine) return null;
 
   const commit = (next?: string) => {
-    engine.endInlineEdit(true, next ?? value);
+    const finalValue = next ?? value;
+    // No-op commits MUST NOT round-trip through the engine. Otherwise,
+    // the slightest mismatch in fallback semantics between the renderer
+    // and the engine — e.g. renderer treats `undefined` as 'Texto' while
+    // the editor treats `undefined` as '' — would cause the displayed
+    // text to silently flip to '' when the user opens and closes the
+    // editor without typing. Skipping the patch when nothing changed
+    // both fixes that class of bug AND saves a network round-trip.
+    if (finalValue === (request.initialValue ?? '')) {
+      engine.endInlineEdit(false);
+    } else {
+      engine.endInlineEdit(true, finalValue);
+    }
     onClose();
   };
   const cancel = () => {

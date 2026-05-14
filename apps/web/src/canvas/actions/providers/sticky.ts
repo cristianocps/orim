@@ -65,11 +65,13 @@ export const stickyProvider: ContextActionProvider = {
             label: 'Card',
             group: 'style',
             run: () => {
-              const text = (primary as any).text ?? '';
+              // Sticky text now lives in a child text element, not on
+              // the sticky itself. We could move/reparent the child to
+              // become the card's title, but for v1 we just convert the
+              // shape (children will retain their parentId reference and
+              // continue rendering inside the new card body).
               store.updateElement(primary.id, {
                 type: 'card',
-                title: text || 'Nova tarefa',
-                description: '',
                 status: 'todo',
                 priority: 'medium',
                 tags: [],
@@ -82,7 +84,8 @@ export const stickyProvider: ContextActionProvider = {
             label: 'Texto',
             group: 'style',
             run: () => {
-              const text = (primary as any).text ?? '';
+              const child = store.getChildren(primary.id).find((c) => c.type === 'text');
+              const text = (child as any)?.text ?? '';
               store.updateElement(primary.id, {
                 type: 'text',
                 text,
@@ -95,16 +98,19 @@ export const stickyProvider: ContextActionProvider = {
     ];
     return actions;
   },
-  properties: ({ primary, patch }) => {
+  properties: ({ primary, patch, store }) => {
     if (!primary || primary.type !== 'sticky_note') return [];
+    const textChild = store.getChildren(primary.id).find((c) => c.type === 'text');
     return [
       {
         id: 'sticky.text',
         label: 'Texto',
         type: 'textarea',
         group: 'content',
-        get: () => (primary as any).text ?? '',
-        set: (_, v) => patch(primary.id, { text: String(v) } as any),
+        get: () => (textChild as any)?.text ?? '',
+        set: (_, v) => {
+          if (textChild) patch(textChild.id, { text: String(v) } as any);
+        },
       },
       {
         id: 'sticky.fontSize',

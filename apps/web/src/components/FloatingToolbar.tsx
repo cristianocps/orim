@@ -26,7 +26,7 @@ const PRIORITY_GROUPS: ContextAction['group'][] = [
 ];
 
 export function FloatingToolbar({ engine }: FloatingToolbarProps) {
-  const { selectedIds, primarySelectionId, getElement, addElement, updateElement, removeElement, setSelectedIds, getElements } =
+  const { selectedIds, primarySelectionId, getElement, addElement, updateElement, removeElement, setSelectedIds, getElements, getChildren } =
     useBoardStore();
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
@@ -43,9 +43,9 @@ export function FloatingToolbar({ engine }: FloatingToolbarProps) {
       selection,
       primary,
       engine,
-      store: { addElement, updateElement, removeElement, setSelectedIds, getElement, getElements },
+      store: { addElement, updateElement, removeElement, setSelectedIds, getElement, getElements, getChildren },
     };
-  }, [engine, selectedIds, primarySelectionId, getElement, addElement, updateElement, removeElement, setSelectedIds, getElements]);
+  }, [engine, selectedIds, primarySelectionId, getElement, addElement, updateElement, removeElement, setSelectedIds, getElements, getChildren]);
 
   const resolved = useMemo(() => {
     if (!ctx) return null;

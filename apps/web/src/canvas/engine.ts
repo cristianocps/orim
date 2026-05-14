@@ -89,6 +89,16 @@ export interface CanvasEngine {
   addRandomShape(type: string): CanvasElement | null;
   insertElementAt(type: string, point?: Point, overrides?: Partial<CanvasElement>): CanvasElement | null;
   duplicateElement(id: string): CanvasElement | null;
+  /**
+   * Recompute the layout (wrap width, position) of every text child of
+   * every parent on the board. Called once after the initial board load
+   * so legacy elements (created before `metadata.layoutRole` existed)
+   * inherit the auto-fit behavior without needing a manual resize. Uses
+   * `skipEmit: true` so we don't shower the API with one PATCH per
+   * child on first paint — the next user resize will persist the new
+   * geometry naturally.
+   */
+  applyInitialChildLayouts(): void;
   setLocked(id: string, locked: boolean): void;
   setSelection(ids: string[]): void;
   getSelection(): SelectionInfo;
@@ -241,6 +251,17 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
 
   // Inline edit
   let editingId: string | null = null;
+  // De-dupe window for double-click → inline-edit. Pixi v8 pools event
+  // objects (FederatedEvent instances are reused across dispatches), so
+  // tagging an event with a custom flag like `e.__handled = true` LEAKS
+  // into the next dispatch that reuses the same pool slot. Symptom: after
+  // editing one element, the very next double-click on a DIFFERENT
+  // element gets blocked because tryBeginInlineEdit thinks the (recycled)
+  // event was already handled. We use a wall-clock window instead — a
+  // 120ms debounce is more than enough to coalesce the two paths
+  // (manual pointerdown timer + pixi pointertap detail >= 2) without
+  // ever blocking a legitimate next edit.
+  let lastInlineEditAttemptAt = 0;
   // The descriptor we resolved when starting the edit. Cached because the
   // renderer may rebuild the visual mid-edit (style change from a parallel
   // user action) and `__inlineEditor` would point to the new one — we want
@@ -644,21 +665,57 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
     // shorter than many people's natural cadence).
     const tryBeginInlineEdit = (e: FederatedPointerEvent, source: string): boolean => {
       if (isLocked(el.id)) return false;
-      const hasEditor = (container as any).__inlineEditor || (container as any).__inlineEditors;
-      if (!hasEditor) return false;
-      if ((e as any).__orimInlineEditHandled) return false;
-      (e as any).__orimInlineEditHandled = true;
+      // Resolution order:
+      //   1. Container has a native editor descriptor (__inlineEditor /
+      //      __inlineEditors) — use it directly. This is the only path
+      //      `text` elements (and the only legacy path remaining for
+      //      composite shapes that haven't migrated yet) take.
+      //   2. Container has NO editor but owns a text-typed descendant —
+      //      delegate to that child. This is what "text as a sub-component"
+      //      gives us: dblclick on a sticky_note finds its embedded text
+      //      element and opens THAT editor, so every shape with a text
+      //      child becomes editable for free without renderer changes.
+      //   3. Nothing to edit — bail. Don't stop propagation so the canvas
+      //      gets a chance to react to the click normally.
+      const hasOwnEditor = (container as any).__inlineEditor || (container as any).__inlineEditors;
+      let targetId: string | null = null;
+      if (hasOwnEditor) {
+        targetId = el.id;
+      } else {
+        targetId = findTextDescendant(el.id);
+      }
+      if (!targetId) return false;
+      // De-dupe within the same double-click cycle WITHOUT touching the
+      // event object (Pixi v8 pools events; see comment near
+      // `lastInlineEditAttemptAt`). 120ms is shorter than human "next
+      // dblclick" latency but larger than the gap between the manual
+      // pointerdown trigger and Pixi's matching pointertap that fires
+      // right after.
+      const now = performance.now();
+      if (now - lastInlineEditAttemptAt < 120) return false;
+      lastInlineEditAttemptAt = now;
       e.stopPropagation();
       const worldPoint = screenToWorld({ x: e.global.x, y: e.global.y });
       if (DEBUG_ENGINE) {
         console.info('[engine] beginInlineEdit', {
-          id: el.id,
+          id: targetId,
+          fromContainer: el.id,
           source,
           worldPoint,
           detail: (e as any).detail,
         });
       }
-      engine.beginInlineEdit(el.id, { worldPoint });
+      // Selecting the editing target keeps the FloatingToolbar pinned to
+      // the right element while the user types (so format actions like
+      // Bold/Italic operate on the same node being edited).
+      if (targetId !== el.id) {
+        selectedIds.clear();
+        selectedIds.add(targetId);
+        primarySelectionId = targetId;
+        emitSelection();
+        renderSelection();
+      }
+      engine.beginInlineEdit(targetId, { worldPoint });
       return true;
     };
 
@@ -695,15 +752,24 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
         }
       }
 
+      // Figma-style selection: a single click selects the visual ROOT of
+      // the clicked element, NOT the element itself. So clicking the text
+      // inside a sticky_note selects the sticky_note as a whole. The user
+      // then either:
+      //   - Drags it to move the entire group, OR
+      //   - Double-clicks to enter and edit the text child (handled by
+      //     `tryBeginInlineEdit` above, which picks the descendant text
+      //     and selects IT for editing).
+      // If the root IS this element (no parentId), targetId === el.id.
+      const targetId = resolveSelectionRoot(el.id);
+      const targetContainer = elementMap.get(targetId) ?? container;
+
       if (e.button === 2) {
-        // Right click: select the element (if not already in selection) so
-        // the floating toolbar / properties panel reflect the same target the
-        // context menu acts on, then emit the contextMenu request.
         e.stopPropagation();
-        if (!selectedIds.has(el.id)) {
+        if (!selectedIds.has(targetId)) {
           selectedIds.clear();
-          selectedIds.add(el.id);
-          primarySelectionId = el.id;
+          selectedIds.add(targetId);
+          primarySelectionId = targetId;
           emitSelection();
           renderSelection();
         }
@@ -711,7 +777,7 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
           screenX: e.global.x,
           screenY: e.global.y,
           worldPoint: screenToWorld({ x: e.global.x, y: e.global.y }),
-          targetId: el.id,
+          targetId,
         } as ContextMenuRequest);
         return;
       }
@@ -720,28 +786,28 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
       // Connector mode — clicking element creates anchored connector
       if (connectorMode) {
         const worldPos = screenToWorld({ x: e.global.x, y: e.global.y });
-        const { anchor } = findNearestAnchor(container, worldPos);
-        engine.startConnectorFrom(el.id, anchor, { x: e.global.x, y: e.global.y });
+        const { anchor } = findNearestAnchor(targetContainer, worldPos);
+        engine.startConnectorFrom(targetId, anchor, { x: e.global.x, y: e.global.y });
         return;
       }
 
-      const isLockedEl = isLocked(el.id);
+      const isLockedEl = isLocked(targetId);
 
       // Select
       if (e.shiftKey) {
-        if (selectedIds.has(el.id)) {
-          selectedIds.delete(el.id);
-          if (primarySelectionId === el.id) primarySelectionId = null;
+        if (selectedIds.has(targetId)) {
+          selectedIds.delete(targetId);
+          if (primarySelectionId === targetId) primarySelectionId = null;
         } else {
-          selectedIds.add(el.id);
-          primarySelectionId = el.id;
+          selectedIds.add(targetId);
+          primarySelectionId = targetId;
         }
       } else {
-        if (!selectedIds.has(el.id)) {
+        if (!selectedIds.has(targetId)) {
           selectedIds.clear();
-          selectedIds.add(el.id);
+          selectedIds.add(targetId);
         }
-        primarySelectionId = el.id;
+        primarySelectionId = targetId;
       }
       emitSelection();
       renderSelection();
@@ -752,10 +818,18 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
       const startPositions = new Map<string, { x: number; y: number }>();
       selectedIds.forEach((sid) => {
         const c = elementMap.get(sid);
-        if (c && !isLocked(sid)) startPositions.set(sid, { x: c.x, y: c.y });
+        if (!c || isLocked(sid)) return;
+        // Only allow dragging top-level elements. Children live in their
+        // parent's container and their `position.x/y` is in PARENT-LOCAL
+        // coords; the drag delta we compute is in WORLD coords, so naively
+        // applying it would multiply through any non-identity parent
+        // transform. Children move automatically when the parent moves
+        // (Pixi composes transforms), so they don't need their own drag.
+        if (c.parent !== elementsContainer) return;
+        startPositions.set(sid, { x: c.x, y: c.y });
       });
       dragSession = {
-        primaryId: el.id,
+        primaryId: targetId,
         startPositions,
         pointerStart: worldPos,
         moved: false,
@@ -924,6 +998,8 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
   function endResize() {
     if (!resizing) return;
     const id = resizing.id;
+    const startSize = resizing.startSize;
+    const startRadius = resizing.startRadius;
     const el = elementModels.get(id);
     if (el) {
       // Final emit so sync persists the new size. We include every field
@@ -937,6 +1013,25 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
       if ((el as any).colWidths) (finalPatch as any).colWidths = [...(el as any).colWidths];
       if ((el as any).rowHeights) (finalPatch as any).rowHeights = [...(el as any).rowHeights];
       emit('element.updated', { id, patch: finalPatch });
+
+      // Cascade the resize to text children: re-fit wrap width / position
+      // and scale fontSize by the parent's growth ratio. Using the SMALLER
+      // of (widthRatio, heightRatio) keeps the text from blowing up when
+      // the user only stretches one dimension (e.g. dragging a sticky to
+      // be very wide but still short). Without this, the child text stays
+      // the same physical size while the parent grows, leaving tiny text
+      // drowning in a huge shape — the exact symptom the user reported.
+      let fontRatio = 1;
+      const newSize = (el as any).size as { width: number; height: number } | undefined;
+      const newRadius = (el as any).radius as number | undefined;
+      if (startSize && newSize) {
+        const rx = newSize.width / Math.max(1, startSize.width);
+        const ry = newSize.height / Math.max(1, startSize.height);
+        fontRatio = Math.min(rx, ry);
+      } else if (startRadius !== undefined && newRadius !== undefined && startRadius > 0) {
+        fontRatio = newRadius / startRadius;
+      }
+      relayoutTextChildren(id, fontRatio);
     }
     resizing = null;
     app.stage.cursor = 'default';
@@ -1411,12 +1506,24 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
     const c = elementMap.get(id);
     const el = elementModels.get(id);
     if (!c || !el) return;
-    destroyChildren(c);
+    // Selectively destroy ONLY the previous renderer-produced visual.
+    // A naive `destroyChildren(c)` would also wipe out child element
+    // containers (e.g. the text node that lives inside a sticky_note),
+    // making them disappear and break their event handlers as soon as
+    // any property of the parent was patched.
+    const prevVisual = (c as any).__visual as Container | undefined;
+    if (prevVisual && !prevVisual.destroyed) {
+      c.removeChild(prevVisual);
+      prevVisual.destroy({ children: true });
+    }
+    (c as any).__visual = undefined;
     const renderer = rendererRegistry.get(el.type);
     if (renderer) {
       const visual = renderer(el);
       if (visual) {
-        c.addChild(visual);
+        (visual as any).__rendererVisual = true;
+        c.addChildAt(visual, 0);
+        (c as any).__visual = visual;
         const ext = [
           '__getAnchors',
           '__inlineEditor',
@@ -1503,6 +1610,258 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
     if (upd) upd();
   }
 
+  /**
+   * Walk up `parentId` chain from `id` until we hit a top-level element.
+   * Used for Figma-style selection: a single click on a child resolves to
+   * its visual root (the sticky_note that owns the text, the card that
+   * owns the title, etc.). Returns the input id if it has no parent or
+   * a cycle is detected.
+   */
+  function resolveSelectionRoot(id: string): string {
+    let current = elementModels.get(id);
+    for (let i = 0; i < 64 && current?.parentId; i++) {
+      const next = elementModels.get(current.parentId);
+      if (!next || next.id === current.id) break;
+      current = next;
+    }
+    return current?.id ?? id;
+  }
+
+  /**
+   * Find the first descendant of `parentId` whose type is 'text'. We use
+   * this when the user double-clicks a parent (sticky_note, rectangle,
+   * etc.) to delegate inline editing to the parent's text child instead
+   * of duplicating editor logic inside every shape renderer.
+   */
+  function findTextDescendant(parentId: string): string | null {
+    const stack = [parentId];
+    while (stack.length > 0) {
+      const next = stack.pop()!;
+      const direct: string[] = [];
+      elementModels.forEach((m, mid) => {
+        if (m.parentId === next) direct.push(mid);
+      });
+      for (const childId of direct) {
+        const child = elementModels.get(childId);
+        if (child?.type === 'text') return childId;
+        stack.push(childId);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Direct children of `parentId` (one level deep). Used by the layout
+   * cascade and by the resize handler so we don't iterate the descendant
+   * stack when we only need the immediate children.
+   */
+  function getDirectChildrenIds(parentId: string): string[] {
+    const ids: string[] = [];
+    elementModels.forEach((m, id) => {
+      if (m.parentId === parentId) ids.push(id);
+    });
+    return ids;
+  }
+
+  /**
+   * Layout role drives "what does this text mean to its parent" — we can't
+   * infer it from position alone (a card has TWO text children at known
+   * y-offsets and we'd lose the title vs description distinction). The role
+   * is the source of truth: the engine recomputes the child's wrap width,
+   * font size and local position from the parent's CURRENT size whenever
+   * the parent resizes, so the text always fills the shape sensibly
+   * regardless of how big or small the user makes it.
+   *
+   * Roles deliberately mirror the renderer choices in `insertElementAt` so
+   * adding a new shape with text is a single touchpoint per layer:
+   *   - `insertElementAt`: assign the role + initial defaults
+   *   - `computeChildTextLayout`: describe how the role's geometry derives
+   *     from the parent's size
+   * The text renderer itself stays oblivious to the parent — it just reads
+   * `wordWrapWidth` from the model.
+   */
+  type TextLayoutRole =
+    | 'sticky.center'
+    | 'rectangle.center'
+    | 'circle.center'
+    | 'frame.title'
+    | 'card.title'
+    | 'card.description';
+
+  /**
+   * Given a parent shape and one of its text children, return the patch
+   * that re-fits the text inside the parent (wrap width, position, and a
+   * font-size hint when the role demands one). Returns `null` if the
+   * child has no role OR if the parent geometry is incompatible (e.g. a
+   * sticky child requesting a frame layout — defensive only, shouldn't
+   * happen in practice).
+   *
+   * Returned patch DOES NOT include `fontSize` — the resize handler is
+   * responsible for scaling fontSize via the parent growth ratio (see
+   * `endResize`). Decoupling these lets the user manually pick a font
+   * size without us blowing it away every time we recompute layout.
+   */
+  function computeChildTextLayout(
+    parent: CanvasElement,
+    child: CanvasElement,
+  ): Partial<CanvasElement> | null {
+    if (child.type !== 'text') return null;
+    let role = (child.metadata as any)?.layoutRole as TextLayoutRole | undefined;
+    if (!role) {
+      // Backfill the role for legacy children (created by the data
+      // migration script before `layoutRole` existed). Inference is
+      // structural: the parent type uniquely determines the role except
+      // for cards, where we tell title vs description by sibling order.
+      switch (parent.type) {
+        case 'sticky_note':
+          role = 'sticky.center';
+          break;
+        case 'rectangle':
+          role = 'rectangle.center';
+          break;
+        case 'circle':
+          role = 'circle.center';
+          break;
+        case 'frame':
+          role = 'frame.title';
+          break;
+        case 'card': {
+          // First text child = title, second = description. Anything
+          // else is unknown and we leave it alone.
+          const siblings = getDirectChildrenIds(parent.id).filter((sid) => {
+            const s = elementModels.get(sid);
+            return s?.type === 'text';
+          });
+          const idx = siblings.indexOf(child.id);
+          if (idx === 0) role = 'card.title';
+          else if (idx === 1) role = 'card.description';
+          break;
+        }
+      }
+      if (!role) return null;
+    }
+
+    const pSize = (parent as any).size as { width: number; height: number } | undefined;
+    const pRadius = (parent as any).radius as number | undefined;
+
+    let wordWrapWidth: number | undefined;
+    let posX = 0;
+    let posY = 0;
+
+    switch (role) {
+      case 'sticky.center':
+      case 'rectangle.center': {
+        if (!pSize) return null;
+        // 12px padding per side keeps the text from kissing the border.
+        wordWrapWidth = Math.max(40, pSize.width - 24);
+        break;
+      }
+      case 'circle.center': {
+        if (pRadius === undefined) return null;
+        // Inscribed square in a circle has side = radius * sqrt(2). Pad
+        // 8px per side so descenders don't clip against the curve.
+        wordWrapWidth = Math.max(40, pRadius * Math.SQRT2 - 16);
+        break;
+      }
+      case 'frame.title': {
+        if (!pSize) return null;
+        wordWrapWidth = Math.max(40, pSize.width - 24);
+        // Title bar height is ~26px; the renderer puts its top edge at
+        // -halfH. We position the text at the bar's vertical center.
+        posY = -pSize.height / 2 + 13;
+        break;
+      }
+      case 'card.title': {
+        if (!pSize) return null;
+        wordWrapWidth = Math.max(40, pSize.width - 24);
+        // Card title sits 30px below the top edge (matches the original
+        // hard-coded offset from `insertElementAt('card')`).
+        posY = -pSize.height / 2 + 30;
+        break;
+      }
+      case 'card.description': {
+        if (!pSize) return null;
+        wordWrapWidth = Math.max(40, pSize.width - 24);
+        // Description goes 70px below the top — leaves room above for
+        // the title and below for tags / status footer.
+        posY = -pSize.height / 2 + 70;
+        break;
+      }
+    }
+
+    if (wordWrapWidth === undefined) return null;
+
+    return {
+      wordWrapWidth,
+      transform: { ...child.transform, x: posX, y: posY },
+    } as Partial<CanvasElement>;
+  }
+
+  /**
+   * Re-fit every direct text child of `parentId` to the parent's current
+   * size. Optionally scales font size by `fontRatio` (used by the resize
+   * handler so making a sticky 2× wider also makes its text 2× bigger,
+   * within sane bounds). Caller passes `fontRatio = 1` to recompute
+   * geometry only (e.g. when the parent's `size` was set programmatically
+   * but didn't grow — keeps wrap width in sync without changing font).
+   */
+  function relayoutTextChildren(parentId: string, fontRatio: number) {
+    const parent = elementModels.get(parentId);
+    if (!parent) return;
+    const childIds = getDirectChildrenIds(parentId);
+    for (const cid of childIds) {
+      const child = elementModels.get(cid);
+      if (!child || child.type !== 'text') continue;
+      const layoutPatch = computeChildTextLayout(parent, child);
+      if (!layoutPatch) continue;
+
+      const patch: any = { ...layoutPatch };
+
+      if (fontRatio !== 1) {
+        const currentFontSize =
+          (child as any).fontSize ??
+          (child.style?.fontSize as number | undefined) ??
+          14;
+        // Clamp [8, 96] so we never scale text into illegible
+        // pixel-soup OR into "1 character per screen" territory if the
+        // user resizes a sticky to fill the viewport.
+        const newFontSize = Math.max(
+          8,
+          Math.min(96, Math.round(currentFontSize * fontRatio)),
+        );
+        if (newFontSize !== currentFontSize) {
+          patch.fontSize = newFontSize;
+          patch.style = {
+            ...(child.style ?? {}),
+            fontSize: newFontSize,
+          };
+        }
+      }
+
+      engine.updateElement(cid, patch);
+    }
+  }
+
+  /**
+   * Move any already-mounted children of `parentId` into `parentContainer`.
+   * Called whenever a new container is created, so children that were
+   * loaded BEFORE their parent (which can happen because patches are
+   * persisted/replayed in arbitrary order over the wire) get pulled into
+   * the right slot in the display tree retroactively. Without this the
+   * child stays orphaned in `elementsContainer` and dragging the parent
+   * leaves it behind.
+   */
+  function reparentOrphans(parentId: string, parentContainer: Container) {
+    elementModels.forEach((m, id) => {
+      if (m.parentId !== parentId) return;
+      const c = elementMap.get(id);
+      if (!c) return;
+      // Already in the right place? skip.
+      if (c.parent === parentContainer) return;
+      parentContainer.addChild(c);
+    });
+  }
+
   let initialized = false;
   // `destroyed` separates "user asked to destroy" from "pixi has been torn
   // down". In React StrictMode dev (and HMR) the engine init effect mounts,
@@ -1573,7 +1932,15 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
       }
       const visual = renderer(el);
       if (visual) {
+        // Tag the renderer's visual root so rebuilds only destroy it, not
+        // any child element containers that were attached afterwards.
+        (visual as any).__rendererVisual = true;
         container.addChild(visual);
+        // Pin the visual to the bottom of the z-order. Child element
+        // containers should always render ABOVE the parent's shape so
+        // text inside a sticky_note isn't hidden behind the yellow paper.
+        container.setChildIndex(visual, 0);
+        (container as any).__visual = visual;
         const ext = [
           '__getAnchors',
           '__inlineEditor',
@@ -1586,8 +1953,24 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
         }
       }
       setupContainerInteractions(container, el);
-      elementsContainer.addChild(container);
+      // Attach to the parent's container if one is referenced, otherwise
+      // anchor on the root `elementsContainer`. Pixi's display tree gives
+      // us "move parent → move children" for free this way: child
+      // `transform.x/y` is interpreted as LOCAL (relative to the parent's
+      // origin), so dragging or resizing the parent automatically carries
+      // the children along. Children that arrive BEFORE their parent is
+      // mounted are reparented later by `reparentOrphans()`.
+      const parentContainer = el.parentId ? elementMap.get(el.parentId) : null;
+      if (parentContainer) {
+        parentContainer.addChild(container);
+      } else {
+        elementsContainer.addChild(container);
+      }
       elementMap.set(el.id, container);
+      // If this element is a parent that other (already-loaded) children
+      // reference, pull them into our display tree now so the hierarchy
+      // is consistent regardless of the order patches arrive in.
+      reparentOrphans(el.id, container);
       // Refresh any connectors that referenced this id and were waiting
       // (e.g. a connector loaded before its endpoint elements existed).
       connectorsMap.forEach((c, cid) => {
@@ -1653,6 +2036,31 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
       renderSelection();
     },
     deleteElement(id, options = {}) {
+      // Cascade: collect every descendant in the model tree first so we
+      // can delete bottom-up. Without this, removing a sticky_note would
+      // leave its child text element orphaned in `elementsContainer` (its
+      // visual parent reference becomes invalid since destroy() unhooked
+      // it, and its data row points at a now-missing parentId). Bottom-up
+      // ordering also keeps every individual `element.deleted` event
+      // valid: by the time the parent's event fires, the children are
+      // already gone, so listeners (useBoardSync, store) handle each in
+      // isolation.
+      const descendants: string[] = [];
+      const stack: string[] = [id];
+      while (stack.length > 0) {
+        const next = stack.pop()!;
+        elementModels.forEach((m, mid) => {
+          if (m.parentId === next) {
+            descendants.push(mid);
+            stack.push(mid);
+          }
+        });
+      }
+      // Process deepest-first so the parent removal fires last.
+      for (const childId of descendants.reverse()) {
+        engine.deleteElement(childId, options);
+      }
+
       elementModels.delete(id);
       const container = elementMap.get(id);
       if (container) {
@@ -1706,20 +2114,65 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
         updatedAt: new Date().toISOString(),
       } as unknown as CanvasElement;
 
+      // Children created alongside `base`. We register them AFTER the
+      // parent so the engine's `createElement` finds the parent container
+      // already in `elementMap`. Their `transform.x/y` are LOCAL (relative
+      // to the parent's origin) — Pixi composes the parent's transform
+      // when painting, so a child at (0,0) sits at the parent's center.
+      //
+      // Each text child carries `metadata.layoutRole` so the engine can
+      // re-fit its position, wrap width, and font size automatically when
+      // the parent is resized later (see `relayoutTextChildren`). The
+      // initial geometry below is just a seed — `computeChildTextLayout`
+      // overwrites it from the role + parent size right after creation.
+      const children: CanvasElement[] = [];
+      const makeTextChild = (opts: {
+        role: TextLayoutRole;
+        text?: string;
+        fontSize?: number;
+        color?: number;
+        fontWeight?: string;
+        align?: 'left' | 'center' | 'right';
+      }): CanvasElement => ({
+        id: uuidv4(),
+        type: 'text',
+        text: opts.text ?? '',
+        fontSize: opts.fontSize,
+        transform: { x: 0, y: 0, rotation: 0, scaleX: 1, scaleY: 1 },
+        style: {
+          color: opts.color,
+          fontSize: opts.fontSize,
+          fontWeight: opts.fontWeight ?? '500',
+          align: opts.align ?? 'center',
+        },
+        metadata: { layoutRole: opts.role },
+        createdBy: 'local-user',
+        updatedAt: new Date().toISOString(),
+        parentId: id,
+      } as unknown as CanvasElement);
+
       switch (type) {
         case 'rectangle':
           (base as any).size = { width: 160, height: 100 };
           base.style = { fill: 0x3b82f6, stroke: 0x1d4ed8, strokeWidth: 2, cornerRadius: 8 };
+          // Was 14px — too small for the default 160x100 rectangle, and
+          // the user can't read it once the rectangle grows.
+          children.push(makeTextChild({ role: 'rectangle.center', fontSize: 18, color: 0xffffff }));
           break;
         case 'circle':
         case 'ellipse':
           (base as any).radius = 50;
           base.style = { fill: 0x10b981, stroke: 0x047857, strokeWidth: 2 };
+          children.push(makeTextChild({ role: 'circle.center', fontSize: 18, color: 0xffffff }));
           break;
         case 'sticky_note':
-          (base as any).text = '';
           (base as any).size = { width: 180, height: 180 };
-          base.style = { fill: 0xfde68a, fontSize: 16 };
+          base.style = { fill: 0xfde68a };
+          // Sticky's text inherits the same dark slate color the renderer
+          // used to pick via pickContrastingColor() — keeps the UX
+          // identical to the pre-refactor sticky. Bumped 16→18 for
+          // legibility at the default sticky size.
+          children.push(makeTextChild({ role: 'sticky.center', fontSize: 18, color: 0x1e293b }));
           break;
         case 'text':
           (base as any).text = 'Texto';
@@ -1727,17 +2180,36 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
           base.style = { color: 0x1e293b, fontWeight: '500' };
           break;
         case 'frame':
-          (base as any).title = 'Nova seção';
           (base as any).size = { width: 600, height: 400 };
           base.style = { fill: 0xffffff, stroke: 0x94a3b8 };
+          children.push(makeTextChild({
+            role: 'frame.title',
+            text: 'Nova seção',
+            fontSize: 13,
+            color: 0x475569,
+            fontWeight: '600',
+          }));
           break;
         case 'card':
-          (base as any).title = 'Nova tarefa';
-          (base as any).description = '';
           (base as any).status = 'todo';
           (base as any).priority = 'medium';
           (base as any).tags = [];
           (base as any).size = { width: 260, height: 160 };
+          children.push(makeTextChild({
+            role: 'card.title',
+            text: 'Nova tarefa',
+            fontSize: 16,
+            color: 0x1e293b,
+            fontWeight: '600',
+            align: 'left',
+          }));
+          children.push(makeTextChild({
+            role: 'card.description',
+            text: '',
+            fontSize: 13,
+            color: 0x64748b,
+            align: 'left',
+          }));
           break;
         case 'table':
           (base as any).rows = 3;
@@ -1757,7 +2229,47 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
 
       const merged = overrides ? ({ ...base, ...overrides } as CanvasElement) : base;
       engine.createElement(merged);
+      // Children come AFTER the parent so `createElement` finds the parent
+      // container and can attach the child to it via `reparentOrphans`.
+      // Apply the role-driven layout BEFORE registering each child so the
+      // first paint already has the correct wrap width and position —
+      // otherwise the user briefly sees the seed (0,0 + no wrap) before
+      // a follow-up update kicks in.
+      for (const ch of children) {
+        const layoutPatch = computeChildTextLayout(merged, ch);
+        if (layoutPatch) {
+          if (layoutPatch.transform) ch.transform = layoutPatch.transform;
+          if ((layoutPatch as any).wordWrapWidth !== undefined) {
+            (ch as any).wordWrapWidth = (layoutPatch as any).wordWrapWidth;
+          }
+        }
+        engine.createElement(ch);
+      }
       return merged;
+    },
+    applyInitialChildLayouts() {
+      // Walk every parent that has at least one child and re-fit its text
+      // descendants. We use `skipEmit: true` on the underlying patches so
+      // a board with many shapes doesn't fire one PATCH per text child on
+      // load (that would saturate the network and pollute history with
+      // a "no-op" sync from the user's POV).
+      const parents = new Set<string>();
+      elementModels.forEach((m) => {
+        if (m.parentId) parents.add(m.parentId);
+      });
+      parents.forEach((pid) => {
+        const parent = elementModels.get(pid);
+        if (!parent) return;
+        const childIds = getDirectChildrenIds(pid);
+        for (const cid of childIds) {
+          const child = elementModels.get(cid);
+          if (!child || child.type !== 'text') continue;
+          const layoutPatch = computeChildTextLayout(parent, child);
+          if (!layoutPatch) continue;
+          // Only emit local visual update — no persistence on load.
+          engine.updateElement(cid, layoutPatch, { skipEmit: true });
+        }
+      });
     },
     duplicateElement(id) {
       const el = elementModels.get(id);
@@ -2023,6 +2535,24 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
           ? editor.applyValue(value)
           : ({ [editor.field]: value } as any);
         engine.updateElement(id, patch);
+      }
+      // Selection-restore: if the editor was opened on a CHILD (sticky's
+      // text node, card title, etc.), the selection was temporarily moved
+      // to that child while editing so the toolbar's format actions hit
+      // the right node. Once editing ends we want the user back at the
+      // visual root they originally clicked, so future drags/single
+      // clicks behave Figma-style instead of leaving them stuck "inside"
+      // the parent.
+      const editedModel = elementModels.get(id);
+      if (editedModel?.parentId) {
+        const rootId = resolveSelectionRoot(id);
+        if (rootId !== id) {
+          selectedIds.clear();
+          selectedIds.add(rootId);
+          primarySelectionId = rootId;
+          emitSelection();
+          renderSelection();
+        }
       }
       emit('inlineEdit.end', { id });
     },
