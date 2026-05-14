@@ -3,6 +3,8 @@ import {
   Container,
   Graphics,
   Rectangle,
+  Text,
+  TextStyle,
   FederatedPointerEvent,
   Point as PixiPoint,
 } from 'pixi.js';
@@ -43,11 +45,18 @@ export interface HoverInfo {
 
 export interface InlineEditRequest {
   id: string;
-  field: 'text' | 'title' | 'description';
+  field: string;
   multiline: boolean;
   bounds: { x: number; y: number; width: number; height: number };
   fontSize: number;
   initialValue: string;
+  /** Optional style hints so the editor mirrors the rendered text. */
+  fontWeight?: string | number;
+  fontStyle?: 'normal' | 'italic';
+  fontFamily?: string;
+  textAlign?: 'left' | 'center' | 'right';
+  color?: string;
+  background?: string;
 }
 
 export interface ConnectorDragInfo {
@@ -100,8 +109,21 @@ export interface CanvasEngine {
   computeNearestAnchor(elementId: string, worldPoint: Point): ConnectorAnchorId | null;
   startDrawingMode(options: { color: number; width: number; mode: 'pen' | 'highlighter' | 'eraser' }): void;
   endDrawingMode(): void;
-  beginInlineEdit(id: string): void;
+  /**
+   * Start inline editing for an element.
+   *
+   * - When `field` is omitted and the element exposes multiple editors
+   *   (`__inlineEditors`), the engine prefers an editor whose bounds
+   *   contain `worldPoint` (the dblclick location). Otherwise it uses
+   *   the first editor or the legacy `__inlineEditor`.
+   * - When `field` is provided, the engine picks the editor whose
+   *   `field` matches — this powers FloatingToolbar actions like
+   *   "Edit description".
+   */
+  beginInlineEdit(id: string, options?: { field?: string; worldPoint?: Point }): void;
   endInlineEdit(commit?: boolean, value?: string): void;
+  /** Returns the list of inline editors exposed by the element renderer. */
+  listInlineEditors(id: string): { field: string; label?: string }[];
   bringToFront(id: string): void;
   sendToBack(id: string): void;
   bringForward(id: string): void;
@@ -124,6 +146,21 @@ const GRID_COLOR_MAJOR = 0x94a3b8;
 const SELECTION_COLOR = 0x3b82f6;
 const ALIGN_THRESHOLD = 8;
 
+// Bumped each time `initCanvasEngine` is called. Lets you correlate console
+// logs with which engine instance handled a given event — invaluable when
+// HMR / StrictMode briefly produce two engines and you need to check that
+// the live one is actually receiving clicks. Toggle the logs by setting
+// `localStorage.setItem('orim:debug', '1')` in the browser console.
+let nextEngineId = 1;
+const DEBUG_ENGINE = (() => {
+  if (typeof window === 'undefined') return false;
+  try {
+    return localStorage.getItem('orim:debug') === '1';
+  } catch {
+    return false;
+  }
+})();
+
 const HANDLE_SIZE = 10;
 const RESIZE_HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const;
 type ResizeHandle = (typeof RESIZE_HANDLES)[number];
@@ -138,6 +175,7 @@ interface ResizeState {
 }
 
 export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
+  const engineId = nextEngineId++;
   const app = new Application();
   const world = new Container();
   const gridContainer = new Container();
@@ -203,6 +241,57 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
 
   // Inline edit
   let editingId: string | null = null;
+  // The descriptor we resolved when starting the edit. Cached because the
+  // renderer may rebuild the visual mid-edit (style change from a parallel
+  // user action) and `__inlineEditor` would point to the new one — we want
+  // to commit to the field the user originally double-clicked.
+  let activeInlineEditor: InlineEditorDescriptor | null = null;
+
+  /**
+   * Resolve which inline editor to use for an element. Picking order:
+   *
+   *   1. If `field` is supplied → exact match.
+   *   2. If `worldPoint` is supplied → first editor whose bounds contain it.
+   *   3. First entry of `__inlineEditors`.
+   *   4. Fallback to legacy `__inlineEditor`.
+   */
+  function pickInlineEditor(
+    container: Container,
+    options: { field?: string; worldPoint?: Point },
+  ): InlineEditorDescriptor | null {
+    const list = (container as any).__inlineEditors as InlineEditorDescriptor[] | undefined;
+    const single = (container as any).__inlineEditor as InlineEditorDescriptor | undefined;
+    const editors: InlineEditorDescriptor[] = list && list.length > 0
+      ? list
+      : single
+        ? [single]
+        : [];
+    if (editors.length === 0) return null;
+    if (options.field) {
+      const match = editors.find((e) => e.field === options.field);
+      if (match) return match;
+    }
+    if (options.worldPoint) {
+      // Editor bounds live in container-local coords. Convert the world
+      // dblclick point to the container's local coords via global so we
+      // honor any transforms on the container (position/scale/rotation).
+      const globalPt = world.toGlobal(options.worldPoint as PixiPoint);
+      const localPt = container.toLocal(globalPt);
+      for (const e of editors) {
+        if (!e.bounds) continue;
+        const b = e.bounds;
+        if (
+          localPt.x >= b.x
+          && localPt.x <= b.x + b.width
+          && localPt.y >= b.y
+          && localPt.y <= b.y + b.height
+        ) {
+          return e;
+        }
+      }
+    }
+    return editors[0];
+  }
 
   // Drag state
   let dragSession: {
@@ -545,8 +634,67 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
       if (hoveredId === el.id) setHovered(null);
     });
 
+    // Pixi v8's @pixi/events boundary does NOT emit `dblclick` or
+    // `pointerdblclick`. The double-click signal is `e.detail === 2` on the
+    // `click`/`tap`/`pointertap` events (Pixi tracks click count with a
+    // 200ms window internally, see EventBoundary._fireClickAndTap). To cover
+    // ALL pointer types with a single subscription, we listen to `pointertap`
+    // (fires for mouse and touch) and also keep a manual pointerdown timer
+    // as a fallback for slower human double-clicks (the 200ms Pixi window is
+    // shorter than many people's natural cadence).
+    const tryBeginInlineEdit = (e: FederatedPointerEvent, source: string): boolean => {
+      if (isLocked(el.id)) return false;
+      const hasEditor = (container as any).__inlineEditor || (container as any).__inlineEditors;
+      if (!hasEditor) return false;
+      if ((e as any).__orimInlineEditHandled) return false;
+      (e as any).__orimInlineEditHandled = true;
+      e.stopPropagation();
+      const worldPoint = screenToWorld({ x: e.global.x, y: e.global.y });
+      if (DEBUG_ENGINE) {
+        console.info('[engine] beginInlineEdit', {
+          id: el.id,
+          source,
+          worldPoint,
+          detail: (e as any).detail,
+        });
+      }
+      engine.beginInlineEdit(el.id, { worldPoint });
+      return true;
+    };
+
+    container.on('pointertap', (e: FederatedPointerEvent) => {
+      if (drawingMode) return;
+      // detail >= 2 means Pixi counted at least 2 taps on this same target.
+      // We accept >2 too so triple-clicks still open the editor (instead of
+      // being silently swallowed).
+      if ((e as any).detail >= 2) {
+        tryBeginInlineEdit(e, `pointertap-detail-${(e as any).detail}`);
+      }
+    });
+
+    let lastTapTime = 0;
+    let lastTapPos = { x: 0, y: 0 };
+
     container.on('pointerdown', (e: FederatedPointerEvent) => {
       if (drawingMode) return;
+      // Manual double-tap fallback. Pixi's own click-counter uses a 200ms
+      // window which is too tight for many real users. We run our own with
+      // a 500ms / 12px threshold so a relaxed double-click still triggers.
+      // Run BEFORE select/drag setup so the second tap doesn't start a drag.
+      if (e.button !== 2) {
+        const now = performance.now();
+        const dx = e.global.x - lastTapPos.x;
+        const dy = e.global.y - lastTapPos.y;
+        const dist = Math.hypot(dx, dy);
+        if (now - lastTapTime < 500 && dist < 12) {
+          lastTapTime = 0; // consume so triple-clicks don't loop
+          if (tryBeginInlineEdit(e, 'pointerdown-dbltap')) return;
+        } else {
+          lastTapTime = now;
+          lastTapPos = { x: e.global.x, y: e.global.y };
+        }
+      }
+
       if (e.button === 2) {
         // Right click: select the element (if not already in selection) so
         // the floating toolbar / properties panel reflect the same target the
@@ -613,13 +761,6 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
         moved: false,
       };
     });
-
-    container.on('pointerdblclick', (e: FederatedPointerEvent) => {
-      e.stopPropagation();
-      if (isLocked(el.id)) return;
-      const editor = (container as any).__inlineEditor as InlineEditorDescriptor | undefined;
-      if (editor) engine.beginInlineEdit(el.id);
-    });
   }
 
   function emitSelection() {
@@ -651,60 +792,131 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
 
   function applyResize(worldPos: Point) {
     if (!resizing) return;
-    const { id, handle, startBounds, startTransform } = resizing;
+    const { id, handle, startBounds, startTransform, startSize, startRadius } = resizing;
     const pStart = (resizing as any).pointerStart as Point;
     const dx = worldPos.x - pStart.x;
     const dy = worldPos.y - pStart.y;
 
-    let newW = startBounds.width;
-    let newH = startBounds.height;
-    let newX = startTransform.x;
-    let newY = startTransform.y;
+    // Which edges of the bounding box does this handle move?
+    const movesLeft = handle.includes('w');
+    const movesRight = handle.includes('e');
+    const movesTop = handle.includes('n');
+    const movesBottom = handle.includes('s');
 
     const minW = 30;
     const minH = 30;
 
-    if (handle.includes('e')) newW = Math.max(minW, startBounds.width + dx);
-    if (handle.includes('w')) {
-      newW = Math.max(minW, startBounds.width - dx);
-      newX = startTransform.x + (startBounds.width - newW) / 2 + dx / 2;
+    // Compute the new bounding box edges in world coords. The non-moving
+    // edge stays exactly anchored — this is what fixes "corner handles
+    // grow symmetrically around center" (the previous bug).
+    let newLeft = startBounds.x + (movesLeft ? dx : 0);
+    let newRight = startBounds.x + startBounds.width + (movesRight ? dx : 0);
+    let newTop = startBounds.y + (movesTop ? dy : 0);
+    let newBottom = startBounds.y + startBounds.height + (movesBottom ? dy : 0);
+
+    // Enforce minimum size by clamping the moving edge against the anchor.
+    if (newRight - newLeft < minW) {
+      if (movesLeft) newLeft = newRight - minW;
+      else if (movesRight) newRight = newLeft + minW;
     }
-    if (handle.includes('s')) newH = Math.max(minH, startBounds.height + dy);
-    if (handle.includes('n')) {
-      newH = Math.max(minH, startBounds.height - dy);
-      newY = startTransform.y + (startBounds.height - newH) / 2 + dy / 2;
-    }
-    if (handle === 'e' || handle === 'w') {
-      // Horizontal only — don't change y
-      newY = startTransform.y;
-    }
-    if (handle === 'n' || handle === 's') {
-      newX = startTransform.x;
+    if (newBottom - newTop < minH) {
+      if (movesTop) newTop = newBottom - minH;
+      else if (movesBottom) newBottom = newTop + minH;
     }
 
-    // For e/w handles we want the position to shift by half delta to keep the opposite side anchored
-    if (handle === 'e') {
-      newX = startTransform.x + dx / 2;
-    }
-    if (handle === 'w') {
-      newX = startTransform.x + dx / 2;
-    }
-    if (handle === 's') {
-      newY = startTransform.y + dy / 2;
-    }
-    if (handle === 'n') {
-      newY = startTransform.y + dy / 2;
-    }
+    const newBoundsW = newRight - newLeft;
+    const newBoundsH = newBottom - newTop;
+    const newBoundsCx = (newLeft + newRight) / 2;
+    const newBoundsCy = (newTop + newBottom) / 2;
+
+    // Bounds center may not match transform.x/y for elements whose visual
+    // is not symmetric around their local origin — frames put their title
+    // bar in negative-Y space, so bounds.center.y < transform.y. We capture
+    // this offset at start and preserve it across the resize, otherwise
+    // the element drifts by half the offset on every drag.
+    const startBoundsCx = startBounds.x + startBounds.width / 2;
+    const startBoundsCy = startBounds.y + startBounds.height / 2;
+    // offset between start transform and start bounds center
+    const offsetX = startBoundsCx - startTransform.x;
+    const offsetY = startBoundsCy - startTransform.y;
 
     const el = elementModels.get(id);
     if (!el) return;
-    const patch: Partial<CanvasElement> = {
-      transform: { ...el.transform, x: newX, y: newY },
-    };
-    if ((el as any).size) {
-      (patch as any).size = { width: newW, height: newH };
-    } else if ((el as any).radius !== undefined) {
-      (patch as any).radius = Math.max(15, Math.min(newW, newH) / 2);
+
+    // Size delta is applied to the START size (not to the start bounds), so
+    // any "extras" included in bounds (frame title bar, badges, etc.) stay
+    // a constant offset rather than accumulating into size on each resize.
+    const deltaW = newBoundsW - startBounds.width;
+    const deltaH = newBoundsH - startBounds.height;
+
+    const patch: Partial<CanvasElement> = {};
+
+    if (startSize) {
+      // SIZE-based resize: container.scale stays at start values, the
+      // renderer redraws at the new size. The offset between transform and
+      // bounds center stays constant (e.g. frame title bar's -14 px shift),
+      // so the new transform = new bounds center - same offset.
+      patch.transform = {
+        ...el.transform,
+        x: newBoundsCx - offsetX,
+        y: newBoundsCy - offsetY,
+      };
+      (patch as any).size = {
+        width: Math.max(minW, startSize.width + deltaW),
+        height: Math.max(minH, startSize.height + deltaH),
+      };
+    } else if (startRadius !== undefined) {
+      // For circles we keep aspect ratio by using the smaller dimension —
+      // dragging a corner shrinks/grows uniformly, dragging a side does too.
+      const baseDiameter = startRadius * 2;
+      const newDiameter = Math.max(30, baseDiameter + Math.max(deltaW, deltaH));
+      patch.transform = {
+        ...el.transform,
+        x: newBoundsCx - offsetX,
+        y: newBoundsCy - offsetY,
+      };
+      (patch as any).radius = newDiameter / 2;
+    } else if ((el as any).rows !== undefined && (el as any).colWidths) {
+      // Tables: scale colWidths/rowHeights proportionally so cells grow.
+      const ratioX = newBoundsW / Math.max(1, startBounds.width);
+      const ratioY = newBoundsH / Math.max(1, startBounds.height);
+      patch.transform = {
+        ...el.transform,
+        x: newBoundsCx - offsetX,
+        y: newBoundsCy - offsetY,
+      };
+      (patch as any).colWidths = ((el as any).colWidths as number[]).map((w) =>
+        Math.max(40, w * ratioX),
+      );
+      (patch as any).rowHeights = ((el as any).rowHeights as number[]).map((h) =>
+        Math.max(20, h * ratioY),
+      );
+    } else {
+      // SCALE-based resize (drawings, text, custom renderers without `size`):
+      // we scale the container via transform.scaleX/Y. The new transform
+      // position must compensate for the scale so the bounds center lands
+      // exactly at `newBoundsC*` — otherwise the element appears to shift
+      // sideways during resize.
+      //
+      // bounds.center = transform + scale * offset_local, where
+      // offset_local = startBounds.center - startTransform = offsetX/Y
+      // (offset is invariant in local coords because the renderer hasn't
+      // changed). So solving:
+      //   transform = boundsCenter - scale * offset_local
+      const ratioX = newBoundsW / Math.max(1, startBounds.width);
+      const ratioY = newBoundsH / Math.max(1, startBounds.height);
+      const newScaleX = startTransform.scaleX * ratioX;
+      const newScaleY = startTransform.scaleY * ratioY;
+      // offset_local = offset_world / startTransform.scale
+      const localOffsetX = offsetX / Math.max(0.0001, startTransform.scaleX);
+      const localOffsetY = offsetY / Math.max(0.0001, startTransform.scaleY);
+      patch.transform = {
+        ...el.transform,
+        x: newBoundsCx - newScaleX * localOffsetX,
+        y: newBoundsCy - newScaleY * localOffsetY,
+        scaleX: newScaleX,
+        scaleY: newScaleY,
+      };
     }
     engine.updateElement(id, patch, { skipEmit: true });
   }
@@ -714,10 +926,16 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
     const id = resizing.id;
     const el = elementModels.get(id);
     if (el) {
-      // Final emit so sync persists the new size
+      // Final emit so sync persists the new size. We include every field
+      // applyResize might have touched: size, radius, table dims, scale.
+      // Missing any of these here would make the change visible locally
+      // but lost on F5 (because useBoardSync only persists what's in the
+      // emitted patch).
       const finalPatch: Partial<CanvasElement> = { transform: { ...el.transform } };
       if ((el as any).size) (finalPatch as any).size = { ...(el as any).size };
       if ((el as any).radius !== undefined) (finalPatch as any).radius = (el as any).radius;
+      if ((el as any).colWidths) (finalPatch as any).colWidths = [...(el as any).colWidths];
+      if ((el as any).rowHeights) (finalPatch as any).rowHeights = [...(el as any).rowHeights];
       emit('element.updated', { id, patch: finalPatch });
     }
     resizing = null;
@@ -1199,7 +1417,13 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
       const visual = renderer(el);
       if (visual) {
         c.addChild(visual);
-        const ext = ['__getAnchors', '__inlineEditor', '__onUpdate', '__preferredCursor'];
+        const ext = [
+          '__getAnchors',
+          '__inlineEditor',
+          '__inlineEditors',
+          '__onUpdate',
+          '__preferredCursor',
+        ];
         for (const k of ext) {
           if ((visual as any)[k] !== undefined) (c as any)[k] = (visual as any)[k];
         }
@@ -1280,6 +1504,17 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
   }
 
   let initialized = false;
+  // `destroyed` separates "user asked to destroy" from "pixi has been torn
+  // down". In React StrictMode dev (and HMR) the engine init effect mounts,
+  // immediately unmounts, then mounts again — destroy() can fire while
+  // app.init() is still pending. Without this flag, the late-resolving init
+  // appends a second canvas / attaches a second set of pointer handlers
+  // AFTER React has already adopted the second engine; the orphan engine
+  // captures clicks but its events have no listeners (they were registered
+  // on the new engine), so the toolbar never appears AND drag updates never
+  // persist. Both regressions disappear once the late init notices it was
+  // destroyed and tears its own pixi app down instead of attaching it.
+  let destroyed = false;
   let resolveReady: () => void;
   const ready = new Promise<void>((resolve) => {
     resolveReady = resolve;
@@ -1307,15 +1542,47 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
       container.position.set(t.x, t.y);
       container.rotation = t.rotation;
       container.scale.set(t.scaleX, t.scaleY);
-      const renderer = rendererRegistry.get(el.type);
-      if (renderer) {
-        const visual = renderer(el);
-        if (visual) {
-          container.addChild(visual);
-          const ext = ['__getAnchors', '__inlineEditor', '__onUpdate', '__preferredCursor'];
-          for (const k of ext) {
-            if ((visual as any)[k] !== undefined) (container as any)[k] = (visual as any)[k];
-          }
+      let renderer = rendererRegistry.get(el.type);
+      if (!renderer) {
+        // Unknown / unregistered type: render a placeholder rectangle with
+        // the type label so the element stays selectable, draggable, and
+        // persistable. Deleting it (the previous behavior) caused the
+        // toolbar / drag / persistence to silently break for legacy data
+        // saved with `type: 'unknown'` or types like `arrow` / `line` that
+        // don't have a renderer yet — the model would vanish from the
+        // engine but stay in the store, so React would think the element
+        // existed but every engine.getElementBounds(id) returned null.
+        console.warn('[engine] no renderer for type', el.type, '— using placeholder. id=', el.id);
+        renderer = (placeholderEl) => {
+          const visual = new Container();
+          const w = ((placeholderEl as any).size?.width as number | undefined) ?? 120;
+          const h = ((placeholderEl as any).size?.height as number | undefined) ?? 60;
+          const g = new Graphics();
+          g.rect(-w / 2, -h / 2, w, h);
+          g.fill({ color: 0xfee2e2, alpha: 0.7 });
+          g.stroke({ width: 1, color: 0xdc2626, alpha: 0.6 });
+          visual.addChild(g);
+          const t = new Text({
+            text: `?\n${placeholderEl.type}`,
+            style: new TextStyle({ fontSize: 12, fill: 0x991b1b, align: 'center' }),
+          });
+          t.anchor.set(0.5);
+          visual.addChild(t);
+          return visual;
+        };
+      }
+      const visual = renderer(el);
+      if (visual) {
+        container.addChild(visual);
+        const ext = [
+          '__getAnchors',
+          '__inlineEditor',
+          '__inlineEditors',
+          '__onUpdate',
+          '__preferredCursor',
+        ];
+        for (const k of ext) {
+          if ((visual as any)[k] !== undefined) (container as any)[k] = (visual as any)[k];
         }
       }
       setupContainerInteractions(container, el);
@@ -1527,8 +1794,49 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
     },
     getElementBounds(id) {
       const c = elementMap.get(id);
-      if (!c) return null;
-      return localBoundsToWorld(c);
+      if (c) return localBoundsToWorld(c);
+      // Connectors live in `connectorsMap` (they're overlay containers, not
+      // owned by `elementsContainer`). Without this fallback, the floating
+      // toolbar / properties panel never showed for connector selections,
+      // because `getElementBounds` returned null and the toolbar bailed out.
+      const conn = connectorsMap.get(id);
+      if (conn) {
+        const el = elementModels.get(id) as ConnectorElement | undefined;
+        if (!el) return null;
+        const from = elementToConnectorEndpoint(el, 'from');
+        const to = elementToConnectorEndpoint(el, 'to');
+        const points: Point[] = [];
+        const resolveWorldPoint = (ep: typeof from) => {
+          if (!ep) return null;
+          if (ep.kind === 'point') return { x: ep.x, y: ep.y };
+          const target = elementMap.get(ep.elementId);
+          if (!target) return null;
+          const localPt = getAnchorPoint(target, ep.anchorId);
+          const globalPt = target.toGlobal(localPt);
+          const worldPt = world.toLocal(globalPt);
+          return { x: worldPt.x, y: worldPt.y };
+        };
+        const a = resolveWorldPoint(from);
+        const b = resolveWorldPoint(to);
+        if (a) points.push(a);
+        if (b) points.push(b);
+        if (points.length === 0) return null;
+        const xs = points.map((p) => p.x);
+        const ys = points.map((p) => p.y);
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+        // Pad so the toolbar doesn't sit on top of the connector line itself.
+        const pad = 8;
+        return {
+          x: minX - pad,
+          y: minY - pad,
+          width: Math.max(40, maxX - minX) + pad * 2,
+          height: Math.max(20, maxY - minY) + pad * 2,
+        };
+      }
+      return null;
     },
     getElementScreenRect(id) {
       const c = elementMap.get(id);
@@ -1611,53 +1919,120 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
       }
       app.stage.cursor = 'default';
     },
-    beginInlineEdit(id) {
+    beginInlineEdit(id, options = {}) {
       const c = elementMap.get(id);
       const el = elementModels.get(id);
       if (!c || !el) return;
-      const editor = (c as any).__inlineEditor as InlineEditorDescriptor | undefined;
+      const editor = pickInlineEditor(c, options);
       if (!editor) return;
       editingId = id;
-      const visualBounds = editor.bounds ?? localBoundsToWorld(c);
-      let bounds: { x: number; y: number; width: number; height: number };
+      activeInlineEditor = editor;
+      // Compute the editor's screen rect via Pixi's own transform pipeline so
+      // it honors the element's scale/rotation (resized stickies, rotated
+      // shapes, etc.) without us re-implementing the math. We sample the
+      // four corners of the editor bounds in LOCAL coords, project each to
+      // world via the container's transform, and take the AABB.
+      let worldRect: { x: number; y: number; width: number; height: number };
       if (editor.bounds) {
-        // Bounds are in local coords relative to element center; translate to world
-        bounds = {
-          x: el.transform.x + editor.bounds.x,
-          y: el.transform.y + editor.bounds.y,
-          width: editor.bounds.width,
-          height: editor.bounds.height,
-        };
+        const eb = editor.bounds;
+        const corners: Point[] = [
+          { x: eb.x, y: eb.y },
+          { x: eb.x + eb.width, y: eb.y },
+          { x: eb.x, y: eb.y + eb.height },
+          { x: eb.x + eb.width, y: eb.y + eb.height },
+        ].map((p) => {
+          const globalPt = c.toGlobal(p as PixiPoint);
+          const worldPt = world.toLocal(globalPt);
+          return { x: worldPt.x, y: worldPt.y };
+        });
+        const xs = corners.map((p) => p.x);
+        const ys = corners.map((p) => p.y);
+        const minX = Math.min(...xs);
+        const minY = Math.min(...ys);
+        worldRect = { x: minX, y: minY, width: Math.max(...xs) - minX, height: Math.max(...ys) - minY };
       } else {
-        bounds = visualBounds;
+        worldRect = localBoundsToWorld(c);
       }
-      const screenTL = worldToScreen({ x: bounds.x, y: bounds.y });
-      const screenBR = worldToScreen({ x: bounds.x + bounds.width, y: bounds.y + bounds.height });
-      const initial = ((el as any)[editor.field] as string) ?? '';
+      const screenTL = worldToScreen({ x: worldRect.x, y: worldRect.y });
+      const screenBR = worldToScreen({
+        x: worldRect.x + worldRect.width,
+        y: worldRect.y + worldRect.height,
+      });
+      // The InlineEditor uses `position: fixed`, which is viewport-relative,
+      // but worldToScreen returns canvas-internal coords (relative to the
+      // canvas element's top-left, which sits BELOW the header and to the
+      // RIGHT of the left toolbar). Add the canvas's bounding rect so the
+      // overlay actually lands on top of the element instead of drifting
+      // up-left by the header/sidebar offsets.
+      const canvasRect = container.getBoundingClientRect();
+      const initial = editor.getValue
+        ? editor.getValue()
+        : (((el as any)[editor.field] as string) ?? '');
+      // Scale the editor's font with the viewport zoom so the overlay text
+      // matches the rendered text size at any zoom level.
+      const baseFontSize = (editor.fontSize ?? 14) * viewport.zoom;
+      const styleObj = (el.style ?? {}) as Record<string, unknown>;
+      const align = (styleObj.align as 'left' | 'center' | 'right' | undefined) ?? 'center';
+      // Color resolution priority:
+      //   1. `editor.color` / `editor.background` (renderer-supplied — most
+      //      accurate because it matches whatever the renderer actually
+      //      drew, including computed contrast colors for stickies).
+      //   2. `style.color` / `style.fill` from the element model.
+      //   3. Engine fallback (slate text on white).
+      // Without (1), renderers like rectangle / circle that pick a default
+      // text color (white) but DON'T write `style.color` would render the
+      // editor with dark text on a white box — looking like the text vanished.
+      const numericStyleColor = styleObj.color as number | undefined;
+      const cssColor = editor.color
+        ?? (numericStyleColor !== undefined
+          ? `#${numericStyleColor.toString(16).padStart(6, '0')}`
+          : '#1e293b');
+      const numericStyleBg = styleObj.fill as number | undefined;
+      const cssBg = editor.background
+        ?? (numericStyleBg !== undefined
+          ? `#${numericStyleBg.toString(16).padStart(6, '0')}`
+          : undefined);
       emit('inlineEdit.start', {
         id,
         field: editor.field,
         multiline: editor.multiline ?? false,
         bounds: {
-          x: screenTL.x,
-          y: screenTL.y,
+          x: screenTL.x + canvasRect.left,
+          y: screenTL.y + canvasRect.top,
           width: screenBR.x - screenTL.x,
           height: screenBR.y - screenTL.y,
         },
-        fontSize: (editor.fontSize ?? 14) * viewport.zoom,
+        fontSize: baseFontSize,
         initialValue: initial,
+        fontWeight: (styleObj.fontWeight as string | number | undefined) ?? '500',
+        fontStyle: (styleObj.fontStyle as 'normal' | 'italic' | undefined) ?? 'normal',
+        fontFamily: ((el as any).fontFamily as string | undefined),
+        textAlign: align,
+        color: cssColor,
+        background: cssBg,
       } as InlineEditRequest);
     },
     endInlineEdit(commit = true, value) {
       if (!editingId) return;
       const id = editingId;
+      const editor = activeInlineEditor;
       editingId = null;
-      const editor = (elementMap.get(id) as any)?.__inlineEditor as InlineEditorDescriptor | undefined;
+      activeInlineEditor = null;
       if (commit && editor && value !== undefined) {
-        const patch: Partial<CanvasElement> = { [editor.field]: value } as any;
+        const patch: Partial<CanvasElement> = editor.applyValue
+          ? editor.applyValue(value)
+          : ({ [editor.field]: value } as any);
         engine.updateElement(id, patch);
       }
       emit('inlineEdit.end', { id });
+    },
+    listInlineEditors(id) {
+      const c = elementMap.get(id);
+      if (!c) return [];
+      const list = (c as any).__inlineEditors as InlineEditorDescriptor[] | undefined;
+      const single = (c as any).__inlineEditor as InlineEditorDescriptor | undefined;
+      const all = list && list.length > 0 ? list : single ? [single] : [];
+      return all.map((e) => ({ field: e.field, label: e.label }));
     },
     bringToFront(id) {
       const c = elementMap.get(id);
@@ -1783,6 +2158,10 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
       events[event] = events[event]?.filter((h) => h !== handler) ?? [];
     },
     destroy() {
+      if (DEBUG_ENGINE) console.info('[engine] destroy', { engineId, initialized });
+      // Mark first so a still-pending app.init() resolves into the
+      // self-destruct branch instead of attaching a second canvas.
+      destroyed = true;
       cancelHoverClear();
       if (initialized) {
         try {
@@ -1791,6 +2170,10 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
           // ignore pixi destroy race
         }
       }
+      // Clear the events map so any lingering emit() calls (e.g. flushes
+      // running through deferred timers) don't fire on stale React closures
+      // that point at an unmounted store.
+      for (const k of Object.keys(events)) delete events[k];
       container.removeEventListener('wheel', onWheel);
       container.removeEventListener('touchstart', onTouchStart);
       container.removeEventListener('touchmove', onTouchMove);
@@ -1829,6 +2212,12 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
 
   registerBuiltinRenderers();
 
+  // Defensively clear any leftover canvases in the container. With HMR the
+  // previous engine's app.canvas may have outlived its destroy() — clearing
+  // here guarantees a clean slate so we never end up with two stacked
+  // canvases stealing each other's pointer events.
+  while (container.firstChild) container.removeChild(container.firstChild);
+
   app.init({
     resizeTo: container,
     backgroundColor: 0xf8fafc,
@@ -1837,6 +2226,17 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
     resolution: window.devicePixelRatio || 1,
   }).then(() => {
     initialized = true;
+    if (destroyed) {
+      // React already discarded this engine while we were waiting on init.
+      // Don't attach the canvas / event listeners — that would leave an
+      // orphan capturing clicks behind the live engine.
+      try {
+        app.destroy(true, { children: true });
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
     container.appendChild(app.canvas);
     app.stage.addChild(world);
     app.stage.eventMode = 'static';
@@ -1852,10 +2252,17 @@ export function initCanvasEngine(container: HTMLDivElement): CanvasEngine {
     container.addEventListener('contextmenu', onContextMenu);
     updateWorldTransform();
     resolveReady();
+    if (DEBUG_ENGINE) console.info('[engine] init complete', { engineId });
   });
 
   // Ensure anchors are accessible from outside (used by render hover handles)
   void getAnchorDescriptors;
 
+  // Tag for cross-module debugging — useBoardSync logs which engineId it
+  // wired its listeners to so you can verify the listener-bearing engine
+  // matches the click-handling engine when both StrictMode mounts settle.
+  (engine as any).__engineId = engineId;
+
+  if (DEBUG_ENGINE) console.info('[engine] created', { engineId });
   return engine;
 }

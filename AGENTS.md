@@ -6,7 +6,7 @@
 
 ## Last Updated
 
-2026-05-13 (F5 persistence loss — stale flush closure + partial pending) (websocket throttling + flush hardening)
+2026-05-13 (inline editor: removido backdrop que impedia abrir editor em outros elementos)
 
 ---
 
@@ -34,6 +34,212 @@ Orim is a **collaborative whiteboard platform** built as a Turborepo monorepo. T
 ---
 
 ## Recent Fixes & Decisions
+
+### 0.13. InlineEditor: backdrop comia o clique de transição entre elementos (2026-05-13)
+
+**Sintoma reportado:** "Após editar um elemento o editor não aparece em nenhum outro".
+
+**Causa raiz.** `InlineEditor` envolvia o `<textarea>` em um `<div className="inline-editor-backdrop">` com `position: fixed; inset: 0; z-index: 200`. O backdrop existia para detectar clique-fora-pra-commitar (`if (e.target === e.currentTarget) commit()`), mas como cobre a viewport inteira ele intercepta TODO clique destinado ao canvas. Sequência observada quando o usuário tentava dblclick em um elemento B logo após editar A:
+
+1. `mousedown` em B aparente → na verdade bate no backdrop (z-index 200 > canvas)
+2. Backdrop dispara `commit()` → `engine.endInlineEdit(true, value)` → editor desmonta
+3. **O evento nunca chega no canvas** — B não recebe o clique
+4. Para de fato dar dblclick em B o usuário precisaria de _quatro_ cliques: 1 commit silencioso, 2 reais para B, mais 1 de recuperação. Como ninguém percebe esse gap, parecia que o editor "ficava travado" depois da primeira edição.
+
+**Correção.** Removido o backdrop. O `InlineEditor` agora renderiza só o `<textarea>`/`<input>` flutuante (`position: fixed; z-index: 220`). Click-outside-pra-commitar vem do próprio `onBlur` do input — clicar em qualquer lugar fora desfocaliza, dispara commit, e o evento chega normalmente em quem foi clicado (canvas, outro elemento, sidebar). É como Figma/Miro fazem.
+
+**Ordering de z-index** ficou:
+
+```
+canvas      < auto >
+inline editor (textarea)  220
+floating-toolbar          250  ← acima do editor para Bold/Italic clicáveis
+toolbar submenu           260
+```
+
+A toolbar e seus submenus mantêm `onMouseDown={(e) => e.preventDefault()}` para não perder o foco do textarea quando o usuário clica num botão de formatação (sem isso, blur dispara antes do click → commit prematuro).
+
+Adicionalmente o editor faz `e.stopPropagation()` no próprio `onMouseDown` para evitar que o canvas inicie um retângulo de seleção quando o usuário arrasta selecionando texto dentro do input.
+
+**Arquivos:** `apps/web/src/components/InlineEditor.tsx`, `apps/web/src/components/InlineEditor.css`.
+
+### 0.12. Edição de texto in-place + formatação compartilhada na toolbar + setas de connector (2026-05-13)
+
+**Pedido do usuário:** "ao clicar duas vezes precisamos permitir a edição do texto in place, alem disso seria bom possibilitarmos formatar o texto usando a barra de contexto. Notei também que a seta das conexões estão quebradas e seria importante configurar as conexões".
+
+**Mudanças:**
+
+−1. **InlineEditor: texto somia + sem opções de formatação visível** (`apps/web/src/components/FloatingToolbar.{tsx,css}`, `apps/web/src/canvas/renderers/builtins/*.ts`, `apps/web/src/canvas/engine.ts`).
+
+   **Sintoma reportado:** "Quando o inline editor é ativado o texto some e não exibimos nenhuma opção de formatação do texto".
+
+   **Bug 1 — toolbar escondida atrás do backdrop.** `.inline-editor-backdrop` tinha `z-index: 200` e cobria a viewport inteira (`position: fixed; inset: 0`). `.floating-toolbar` estava em `z-index: 60`. Resultado: a toolbar ficava VISUALMENTE embaixo do backdrop transparente, e qualquer clique nos botões (Bold, Italic, etc.) batia primeiro no backdrop, que dispara `commit()` (porque `e.target === e.currentTarget`) e fecha o editor antes da action rodar. Para o usuário parecia "não tem opção de formatação" — os botões existiam mas eram inertes.
+
+   **Correção:** `.floating-toolbar` foi para `z-index: 250` e `.float-submenu` para `260` (acima do backdrop 200). Adicionalmente, todos os elementos da toolbar e dos submenus ganharam `onMouseDown={(e) => e.preventDefault()}`. Sem esse `preventDefault`, mesmo com z-index correto o `mousedown` no botão tira o foco do `<textarea>` do editor → `onBlur` dispara → commit + fechamento. Com `preventDefault`, o foco fica no textarea e a action só toggla o estilo (bold/italic/cor) sem fechar a edição.
+
+   **Bug 2 — texto "somia" porque cor da overlay não casa com o renderer.** Renderers como `rectangle` desenham texto BRANCO sobre fundo azul mas não escrevem `style.color` no modelo. O engine, ao montar o overlay HTML, fazia fallback para `#1e293b` (escuro) sobre `white` (default do componente). Resultado: usuário com retângulo azul + texto branco rendered → dblclica → editor aparece como caixa BRANCA com texto ESCURO em cima do retângulo azul. As cores não casam, e em alguns combos (texto branco em fundo branco quando `style.color === 0xffffff` mas o engine não tinha esse dado) o texto literalmente fica invisível.
+
+   **Correção:** estendi `InlineEditorDescriptor` com campos `color` e `background` (CSS strings) que cada renderer DEVE preencher com as cores que de fato pintou. Engine prioriza `editor.color`/`editor.background` sobre derivar de `style.color`/`style.fill`. Renderers atualizados:
+
+   - `stickyNote`: usa `pickContrastingColor(fill)` para texto e o próprio `fill` para fundo.
+   - `rectangle`/`circle`: usa `style.color` ou white, e `style.fill` ou cor padrão do shape.
+   - `text`: cor do texto + fundo `rgba(255,255,255,0.95)` (não tem fill).
+   - `card`: `#1e293b` no título sobre `#ffffff`; `#64748b` na descrição sobre `#ffffff`.
+   - `frame`: `#475569` sobre `#e2e8f0` (sólido equivalente do título translúcido).
+   - `table`: por célula — `#f1f5f9` para header row, `#ffffff` ou `cell.backgroundColor` no resto.
+
+   **Limitação aceita:** o overlay do editor não atualiza style ao vivo quando o usuário toggla Bold/Italic durante a edição. A formatação É aplicada (e visível depois do commit), mas durante a digitação o textarea mantém o style do início. Solução completa exigiria reemitir `inlineEdit.start` apenas para style props sem resetar `value`. Adiada.
+
+0. **`pointerdblclick` não existe em Pixi v8 + suporte a múltiplos editors por elemento** (`apps/web/src/canvas/engine.ts`, `apps/web/src/canvas/renderers/types.ts`, `apps/web/src/canvas/renderers/builtins/{card,table}.ts`).
+
+   **Bug 1 — pointerdblclick não existe.** O handler de duplo-clique em `setupContainerInteractions` ouvia `pointerdblclick`, evento que **não é emitido** pelo `@pixi/events` em v8. Eu corrigi pela primeira vez tentando `dblclick`, mas isso também não existe (verificado lendo `node_modules/pixi.js/lib/events/EventBoundary.mjs:_fireClickAndTap` — Pixi v8 só dispara `click`, `tap`, `pointertap`, `rightclick`, com `e.detail` contendo a contagem de cliques rastreada em janela de 200ms). Funcionou parcialmente em card (e nada em rect/circle) por sorte do meu detector manual `pointerdown` ter casado o timing/posição em alguns casos, mas a janela 350ms/8px era apertada demais.
+
+   Solução final usa **dois caminhos** que funilam em `tryBeginInlineEdit` (idempotente via flag `__orimInlineEditHandled` no evento):
+
+   - `pointertap` com `e.detail >= 2` — usa o contador interno do Pixi (200ms, janela curta mas certeira).
+   - Detecção manual no `pointerdown` — janela 500ms/12px, atende cliques humanos mais lentos.
+
+   O check `e.button !== 2` substituiu `e.button === 0 || undefined` porque Pixi v8 às vezes seta `button = -1` para pointer events sintetizados (touch / pen), o que fazia minha detecção anterior nunca disparar lá.
+
+   **Bug 2 — só uma região editável por elemento.** O contrato `__inlineEditor` só permitia um editor por container, então cards (título + descrição) e tabelas (N×M células) ficavam restritos ao primeiro campo. Estendi os tipos para suportar `__inlineEditors: InlineEditorDescriptor[]` com:
+
+   - `field`, `label` para identificação
+   - `bounds` (em coords locais do container) para "qual editor para esta posição?"
+   - `getValue()` para campos aninhados (ex: `cells[r][c].text`)
+   - `applyValue(v)` para retornar o patch (ex: clonar a matriz inteira de cells em vez de gravar `cell_r_c` flat)
+
+   Engine ganhou `pickInlineEditor(container, { field?, worldPoint? })`:
+   - Se `field` dado → match exato (usado por toolbar actions tipo "Editar descrição")
+   - Senão se `worldPoint` dado → editor cujo `bounds` contém o ponto (dblclick na descrição abre o editor de descrição)
+   - Senão → primeiro editor (fallback para dblclick na borda do elemento)
+
+   `endInlineEdit` agora cacheia o descriptor ativo na hora do start e usa `applyValue` se houver, evitando que um rebuild do visual durante a edição mude o campo de destino.
+
+   **Aplicações:**
+   - `card.ts`: dois editors (título / descrição). `cardProvider.actions` ganhou "Editar título" e "Editar descrição" como ações separadas no toolbar.
+   - `table.ts`: um editor por célula da tabela. `applyValue` clona a matriz inteira de cells e sobrescreve só a célula alvo, garantindo que a sincronização REST/WS não recebe um patch malformado.
+
+1. **InlineEditor sai do lugar errado em layouts com header/sidebar** (`apps/web/src/canvas/engine.ts`, `apps/web/src/components/InlineEditor.tsx`).
+
+   `engine.worldToScreen()` retorna coordenadas internas do canvas (relativas ao `<canvas>` em si). O `InlineEditor` usa `position: fixed`, que é **viewport-relative**. Como o canvas fica abaixo do `BoardHeader` (~60px) e à direita da `LeftToolbar` (~60px), o overlay aparecia drift up-left. Em `beginInlineEdit`, somamos `container.getBoundingClientRect().left/top` para emitir bounds em coords de viewport. O editor agora aparece exatamente sobre o texto.
+
+   Bonus: o `beginInlineEdit` agora respeita escala/rotação do elemento (projetando os 4 cantos do `editor.bounds` via `c.toGlobal` → `world.toLocal` em vez de simplesmente somar `transform.x + bounds.x`), e propaga `fontWeight`, `fontStyle`, `fontFamily`, `textAlign`, `color` e `background` para o overlay HTML — assim o que você digita visualmente substitui o texto renderizado em vez de virar uma caixa branca neutra.
+
+2. **Provider compartilhado de formatação de texto** (`apps/web/src/canvas/actions/providers/textFormat.ts`).
+
+   Antes, só `text` tinha bold/itálico/align/cor/tamanho na toolbar. Sticky notes, retângulos e círculos viam apenas as ações específicas do tipo. Criei um `textFormatProvider` registrado **antes** dos providers por tipo, com `types: ['text', 'sticky_note', 'rectangle', 'circle', 'ellipse']`. As ações vão para o grupo `style` (já em PRIORITY_GROUPS visíveis) e o registry de-dupa por `id`, então não há colisão.
+
+   `text.ts`, `sticky.ts` e `shapes.ts` perderam suas ações de "Editar texto" / Bold / Align — agora vêm do provider compartilhado. Mantive properties específicas (font family no text, presets de cor/tamanho no sticky, etc.).
+
+3. **Renderers respeitam `style.fontWeight`, `fontStyle`, `align`, `color`, `fontSize`** (`apps/web/src/canvas/renderers/builtins/{stickyNote,rectangle,circle,text}.ts`).
+
+   Sem isso, toggle de Bold no FloatingToolbar persistia no store mas não tinha efeito visual. Stickys/retângulos/círculos agora pegam todos os 5 campos do `style`. O `text` renderer também aceita `style.fontSize` como fallback do legacy top-level `fontSize` (o `textFormatProvider` escreve em ambos por compatibilidade).
+
+   Em sticky/retângulo, o `align` também desloca o `txt.position.x` para `-width/2 + 12` (left), `width/2 - 12` (right) ou `0` (center) e ajusta `txt.anchor.x` correspondentemente, em vez de só passar `align` para o `TextStyle` (que apenas afeta wrapping de múltiplas linhas, não a posição do bloco).
+
+4. **Setas de connector seguem a tangente real da linha** (`apps/web/src/canvas/connectors.ts`).
+
+   `drawArrowHead` calculava o ângulo como `atan2(to.y - from.y, to.x - from.x)` — a direção reta entre os endpoints. Para `straight` está correto, mas para `curved` (bezier com cps `(midX, from.y)` e `(midX, to.y)`) e `elbow`, a tangente nos endpoints é **horizontal** (a curva entra/sai do ponto na direção X), não diagonal. Resultado: a seta apontava de viés enquanto a linha aproximava o destino na horizontal — ficava parecendo que a seta estava "solta".
+
+   Adicionei `endTangentFor` e `startTangentFor` que calculam a direção real:
+   - `straight`: `normalize(to - from)`
+   - `elbow`: direção do último/primeiro segmento
+   - `curved`: derivada do bezier em t=1 / t=0 (que aqui é horizontal por construção dos cps)
+
+   `drawArrowHead` agora recebe um vetor tangente em vez de dois pontos, e o tamanho da cabeça escala com `strokeWidth` (`size = 10 + max(0, w-1) * 3`) — sem isso, conectores grossos tinham a base do triângulo do mesmo tamanho da espessura da linha, ficando com cara quadrada. Adicionei também um stroke 1px na cabeça pra ficar nítida em zoom out.
+
+5. **Configuração de connectors** já estava implementada no `connectorProvider.actions` desde a passada anterior (estilo da linha curved/straight/elbow, lineStyle solid/dashed/dotted, arrowStart/arrowEnd com triangle/diamond/circle/none, cor, espessura via property panel, label, presets). O grupo `connector` já está nos `PRIORITY_GROUPS` da `FloatingToolbar`, então as ações aparecem no toolbar quando um connector é selecionado.
+
+**Verificação:** `pnpm tsc --noEmit` limpo + lint limpo.
+
+### 0.11. Toolbar não aparece + alterações não persistem após F5 — race do destroy/init do Pixi (2026-05-13)
+
+**Problema reportado:** "A toolbar continua não aparecendo, além disso as movimentações dos elementos e mudanças de propriedades não estão sendo persistidas e perdemos após um refresh".
+
+**Causa raiz (race entre dois engines do Pixi em StrictMode dev / HMR):**
+
+`React.StrictMode` em dev faz mount → cleanup → mount. O `useEffect` de inicialização do canvas roda esse ciclo:
+
+1. **Mount 1** → `engine_A = initCanvasEngine(container)`. `app.init({...})` é assíncrono e ainda está pendente. `setCanvasEngine(engine_A)`.
+2. **Cleanup imediato (StrictMode)** → `engine_A.destroy()`. Como o destroy verificava `if (initialized) app.destroy()`, e `initialized` ainda era `false` (init pendente), pulava a destruição do app. A promise do `app.init()` continuava no ar.
+3. **Mount 2** → `engine_B = initCanvasEngine(container)`. Outro `app.init({...})` pendente. `setCanvasEngine(engine_B)` é o que sobra no estado React.
+4. **Promise do engine_A resolve** → executa o `then` que faz `container.appendChild(engine_A.canvas)` e `app.stage.on('pointerdown', ...)`. Anexa o canvas órfão **depois** que o React já adotou o engine_B.
+5. Promise do engine_B resolve → também anexa seu canvas. Resultado: **dois canvases** no container, ambos capturando ponteiro.
+
+`useBoardSync` registra listeners no engine que está no estado React (`engine_B`). Mas se o canvas de `engine_A` ficar por cima (depende da ordem de resolução das promises), todos os cliques vão para `engine_A`, que emite `selectionChange` / `element.updated` para um `events` map que ninguém escuta.
+
+**Sintomas externos exatamente os reportados:**
+
+- Selecionar elemento "não faz nada": `engine_A` atualiza sua seleção interna mas o handler React está em `engine_B` → `selectedIds` no store fica vazio → FloatingToolbar nunca aparece.
+- Drag movimenta visualmente (porque `engine_A` aplica a translação) mas `element.updated` é emitido em `engine_A` → `useBoardSync.onUpdated` (no `engine_B`) nunca dispara → nenhum PATCH é enviado → F5 perde tudo.
+
+Por isso os logs do backend mostravam ~30 PATCHes ao longo da sessão e depois **silêncio total** — o último evento de HMR derrubou e recriou o engine, ganhando o orfão a corrida.
+
+**Correção em `apps/web/src/canvas/engine.ts`:**
+
+1. **Flag `destroyed`** separada de `initialized`. `destroy()` marca `destroyed = true` antes de tudo.
+2. **No `then` do `app.init()`**, se `destroyed === true`, chama `app.destroy()` localmente e **não** anexa o canvas nem registra listeners. O engine órfão se destrói silenciosamente.
+3. **Limpa `container.firstChild` antes do init** — defesa em profundidade contra leftovers de HMR.
+4. **`destroy()` também esvazia o `events` map**, garantindo que qualquer `emit()` atrasado (ex: timer pendente do flush) não chame closures React de um componente desmontado.
+
+**Defesas adicionais aplicadas no mesmo passe:**
+
+5. **Renderer placeholder para tipos desconhecidos** (`apps/web/src/canvas/engine.ts`). A versão anterior fazia `elementModels.delete(el.id)` quando `rendererRegistry.get(el.type)` era `undefined`, o que sumia com o elemento (continuava no store mas o engine não o conhecia). Agora desenha um retângulo vermelho com label do tipo — selecionável, arrastável, persistível. Tipos legados do schema (`line`, `arrow`) sem renderer agora aparecem visualmente em vez de desaparecer.
+
+6. **`FloatingToolbar` clamp + flip** (`apps/web/src/components/FloatingToolbar.tsx`):
+   - Clamp à largura do canvas (`engine.app.screen.width - tbWidth - 8`); sem isso, selecionar um elemento próximo da borda direita renderizava a toolbar fora da área visível e o `overflow: hidden` da `.canvas-area` cortava — visualmente igual a "não apareceu".
+   - Se não cabe acima da seleção (perto do topo), a toolbar é flipada para BAIXO em vez de ficar oculta por cima da viewport.
+   - Fallback de bounds: se `engine.getElementBounds(id)` retorna `null` (elemento ainda não mirroured no engine), usa `transform.x/y` como âncora 1×1 para a toolbar aparecer pelo menos perto de onde o usuário clicou.
+
+7. **Logs de diagnóstico opcionais** — ative com `localStorage.setItem('orim:debug', '1')` no console do navegador. Logs:
+   - `[engine] created/destroy/init complete { engineId }` — para correlacionar engines vivos.
+   - `[page] selectionChange { engineId, ids }` — confirma se o engine que disparou a seleção é o mesmo que o React está usando.
+   - `[sync] listeners attached/detached { engineId, pendingCount }` — confirma onde o useBoardSync se conectou.
+   - `[sync] onUpdated { id, patchKeys }` — confirma que cada update chegou no listener.
+   - `[sync] flush -> PATCH { count, keepalive }` — confirma os flushes para o backend.
+
+**Arquivos:**
+
+- `apps/web/src/canvas/engine.ts` — flag `destroyed`, init com auto-destroy, limpeza de container, placeholder renderer, `engineId` para diagnósticos.
+- `apps/web/src/components/FloatingToolbar.tsx` — clamp/flip de posição + fallback de bounds.
+- `apps/web/src/hooks/useBoardSync.ts` — logs de diagnóstico.
+- `apps/web/src/pages/BoardEditorPage.tsx` — log de selectionChange com engineId.
+
+**Verificação:** `pnpm tsc --noEmit` (limpo). Lint limpo nos 4 arquivos.
+
+Sobre o `[vite] ws proxy socket error: Error: read ECONNRESET` no terminal — é apenas o proxy WS do Vite registrando que o navegador encerrou abruptamente uma conexão (refresh / aba fechada / HMR). Não afeta a persistência (PATCHes vão por HTTP, não WS) e não está relacionado ao bug acima.
+
+### 0.10. Revisão completa dos componentes do whiteboard (2026-05-13)
+
+**Problema reportado:** "Precisamos revisar a funcionalidade de todos os componentes do whiteboard, alguns quando adicionamos ao quadro não são renderizados, outros não exibem a barra de opções, outros não são redimensionados corretamente, o comportamento dos componentes está bem estranho".
+
+Auditei todos os 11 tipos de elementos × 4 dimensões (renderer, action provider, resize, anchors). Encontrei e corrigi:
+
+**1. Toolbar invisível para conectores.** `engine.getElementBounds(id)` retornava `null` para connectors porque eles vivem em `connectorsMap`, não em `elementMap`. A `FloatingToolbar` aborta quando `getElementBounds` é null, então a barra nunca aparecia ao selecionar um connector. Adicionado fallback que computa bbox a partir dos endpoints (com pad de 8 px para a barra não ficar em cima da linha).
+
+**2. Cantos de resize cresciam simetricamente em torno do centro (todos os tipos).** A lógica antiga só anchorava o lado oposto para handles cardinais (n/s/e/w). Para handles de canto (nw/ne/sw/se), `newX/newY` ficavam em `startTransform`, ou seja, o centro do elemento ficava parado e o elemento crescia simetricamente — o canto oposto ao arrastado também se movia. Reescrito `applyResize` com modelo limpo:
+
+   - Computa `newLeft/newRight/newTop/newBottom` em coordenadas de mundo, anchorando as arestas que NÃO estão sendo movidas.
+   - Aplica clamp de tamanho mínimo na aresta móvel (não na ancorada).
+   - Calcula `newBoundsCenter` e converte de volta para `transform` preservando o offset entre `transform` e `boundsCenter` (constante por tipo).
+
+**3. Frame inflava cumulativamente.** O renderer de frame desenhava o título em `y < -h/2` (fora do retângulo do corpo). `localBounds` ficava `(-w/2, -h/2 - 28, w, h + 28)` — 28 px maior que `size.height`. A cada resize, `applyResize` calculava `newSize.height = startBounds.height + delta = (h + 28) + delta`, e a próxima rodada partia de `h + 56`, e assim por diante. Refatorado o renderer (`apps/web/src/canvas/renderers/builtins/frame.ts`) para colocar o title bar DENTRO do corpo, no topo. Agora `localBounds == size`, e a matemática nova de resize independe disso (já trata offset corretamente).
+
+**4. Tabelas não redimensionavam.** `Table` não tem campo `size` (só `colWidths` / `rowHeights`), então o ramo `if ((el as any).size)` nunca disparava e o patch só mudava `transform`. Adicionado ramo dedicado: escala `colWidths` e `rowHeights` proporcionalmente ao delta de bounds. `endResize` também inclui esses arrays no patch final para persistência.
+
+**5. Drawings, text e imagens sem `size` não redimensionavam.** Mesmo problema de (4). Adicionado fallback que escala via `transform.scaleX/Y` para QUALQUER tipo sem `size/radius/colWidths`. A matemática compensa o deslocamento causado pela escala (`newTransform = newBoundsCenter - newScale * localOffset`) — sem essa compensação, drawings (cujo `transform.x = 0` e pontos estão em coordenadas de mundo) "saltavam" lateralmente durante o resize. Para drawings e text com `transform = (0,0)`, `localOffset = startBoundsCenter / startScale`, garantindo que a aresta ancorada permanece exatamente no mesmo ponto após o resize.
+
+**6. Tipos sem renderer registrado criavam containers fantasma.** Antes: se `rendererRegistry.get(el.type)` retornasse `undefined` (por exemplo, dado corrompido com `type: 'unknown'` da regressão anterior), o container era criado vazio, registrado em `elementMap` mas sem visual. Resize handles ao redor de `(0, 0)`, hit-test inutilizável, debug confuso. Agora `createElement` faz `console.warn` e descarta o elemento (também remove do `elementModels` para não vazar para serializações futuras).
+
+**Arquivos:**
+
+- `apps/web/src/canvas/engine.ts` — novo `applyResize`, novo `endResize` (inclui `colWidths/rowHeights` no patch), novo `createElement` com guard de renderer ausente, `getElementBounds` com fallback para conectores.
+- `apps/web/src/canvas/renderers/builtins/frame.ts` — title bar dentro do corpo.
+
+**Verificação:**
+
+- `pnpm tsc --noEmit` (limpo).
+- Auditoria manual: todos os 11 tipos de elemento têm renderer + provider de ações registrados (`apps/web/src/canvas/renderers/index.ts` + `apps/web/src/canvas/actions/index.ts`).
 
 ### 0. Whiteboard Usability Overhaul (2026-05-13)
 

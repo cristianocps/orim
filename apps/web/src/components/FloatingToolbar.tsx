@@ -97,8 +97,20 @@ export function FloatingToolbar({ engine }: FloatingToolbarProps) {
       let maxX = -Infinity;
       let maxY = -Infinity;
       for (const id of ids) {
-        const b = engine.getElementBounds(id);
-        if (!b) continue;
+        let b = engine.getElementBounds(id);
+        if (!b) {
+          // Fallback for elements the engine no longer knows about (e.g.
+          // selection arrived from store before engine.createElement
+          // mirrored, or an element with an unrenderable type). Use the
+          // element's own transform as a 1×1 anchor so the toolbar still
+          // appears near where the user clicked instead of vanishing.
+          const el = getElement(id);
+          if (el?.transform) {
+            b = { x: el.transform.x - 1, y: el.transform.y - 1, width: 2, height: 2 };
+          } else {
+            continue;
+          }
+        }
         minX = Math.min(minX, b.x);
         minY = Math.min(minY, b.y);
         maxX = Math.max(maxX, b.x + b.width);
@@ -114,8 +126,21 @@ export function FloatingToolbar({ engine }: FloatingToolbarProps) {
       if (!rect) return;
       const tbWidth = ref.current?.offsetWidth ?? 320;
       const tbHeight = ref.current?.offsetHeight ?? 44;
-      const left = Math.max(8, rect.left + rect.width / 2 - tbWidth / 2);
-      const top = Math.max(8, rect.top - tbHeight - 12);
+      // Canvas-area dimensions for clamping. Without a right/bottom clamp,
+      // selecting an off-screen element produced position values larger
+      // than the canvas width — the toolbar was rendered correctly but
+      // immediately clipped by `.canvas-area { overflow: hidden }`, looking
+      // identical to "toolbar didn't appear at all".
+      const canvasW = engine.app?.screen?.width ?? window.innerWidth;
+      const canvasH = engine.app?.screen?.height ?? window.innerHeight;
+      const rawLeft = rect.left + rect.width / 2 - tbWidth / 2;
+      const rawTop = rect.top - tbHeight - 12;
+      const left = Math.max(8, Math.min(canvasW - tbWidth - 8, rawLeft));
+      // If there's no room above (selection near the top of the canvas)
+      // flip the toolbar to BELOW the selection so it's still visible.
+      const top = rawTop < 8
+        ? Math.min(canvasH - tbHeight - 8, rect.top + rect.height + 12)
+        : rawTop;
       if (left !== lastLeft || top !== lastTop) {
         lastLeft = left;
         lastTop = top;
@@ -133,7 +158,7 @@ export function FloatingToolbar({ engine }: FloatingToolbarProps) {
       cancelAnimationFrame(raf);
       window.clearInterval(i);
     };
-  }, [engine, visible, selectedIds, primarySelectionId]);
+  }, [engine, visible, selectedIds, primarySelectionId, getElement]);
 
   if (!visible || !ctx) return null;
 
@@ -153,7 +178,15 @@ export function FloatingToolbar({ engine }: FloatingToolbarProps) {
       className="floating-toolbar"
       ref={ref}
       style={style}
-      onMouseDown={(e) => e.stopPropagation()}
+      // preventDefault keeps focus on whatever was focused (e.g. the inline
+      // editor's textarea). Without it, mousedown shifts focus to the
+      // toolbar, the textarea fires onBlur → commit → editor closes, and
+      // the user's intended formatting toggle never gets to apply to a
+      // still-open editor.
+      onMouseDown={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+      }}
     >
       {visibleGroups.map(({ group, items }, gi) => (
         <div className="float-group" key={group}>
@@ -210,6 +243,7 @@ function ToolbarButton({
       <button
         className={`float-btn ${toggled ? 'toggled' : ''} ${action.group === 'danger' ? 'danger' : ''}`}
         title={action.shortcut ? `${action.label} (${action.shortcut})` : action.label}
+        onMouseDown={(e) => e.preventDefault()}
         onClick={(e) => {
           e.stopPropagation();
           if (hasChildren) {
@@ -223,11 +257,18 @@ function ToolbarButton({
         {Icon ? <Icon size={16} /> : <span style={{ fontSize: 11 }}>{action.label.slice(0, 2)}</span>}
       </button>
       {hasChildren && isOpen && (
-        <div className="float-submenu" onMouseDown={(e) => e.stopPropagation()}>
+        <div
+          className="float-submenu"
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+          }}
+        >
           {action.children!(ctx).map((child) => (
             <button
               key={child.id}
               className={`float-submenu-item ${child.isToggled?.(ctx) ? 'toggled' : ''}`}
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
                 child.run?.(ctx);
                 closeAll();

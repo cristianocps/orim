@@ -1,4 +1,4 @@
-import { CheckCircle2, Flag, Tag, User, Pencil } from 'lucide-react';
+import { CheckCircle2, Flag, Tag, User, Pencil, FileText } from 'lucide-react';
 import type { ContextActionProvider } from '../types.js';
 
 const STATUSES = [
@@ -22,11 +22,18 @@ export const cardProvider: ContextActionProvider = {
     const card = primary as any;
     return [
       {
-        id: 'card.edit',
+        id: 'card.editTitle',
         label: 'Editar título',
         icon: Pencil,
         group: 'content',
-        run: ({ engine }) => engine.beginInlineEdit(primary.id),
+        run: ({ engine }) => engine.beginInlineEdit(primary.id, { field: 'title' }),
+      },
+      {
+        id: 'card.editDescription',
+        label: 'Editar descrição',
+        icon: FileText,
+        group: 'content',
+        run: ({ engine }) => engine.beginInlineEdit(primary.id, { field: 'description' }),
       },
       {
         id: 'card.status',

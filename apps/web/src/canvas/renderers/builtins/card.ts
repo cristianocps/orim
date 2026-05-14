@@ -117,13 +117,46 @@ export const renderCard: ElementRenderer = (el) => {
     container.addChild(avTxt);
   }
 
-  (container as any).__inlineEditor = {
-    field: 'title',
-    multiline: false,
-    fontSize: 15,
-    padding: 4,
-    bounds: { x: -size.width / 2 + 8, y: -size.height / 2 + 36, width: size.width - 36, height: 24 },
+  // Two editable regions: title (top) and description (middle). The engine
+  // picks based on dblclick world position; a fallback FloatingToolbar
+  // action ("Edit description") can target a specific field by name.
+  const titleBounds = {
+    x: -size.width / 2 + 8,
+    y: -size.height / 2 + 36,
+    width: size.width - 36,
+    height: 24,
   };
+  const descBounds = {
+    x: -size.width / 2 + 8,
+    y: -size.height / 2 + 66,
+    width: size.width - 16,
+    height: size.height - 100,
+  };
+  const editors = [
+    {
+      field: 'title' as const,
+      label: 'Título',
+      multiline: false,
+      fontSize: 15,
+      padding: 4,
+      bounds: titleBounds,
+      color: '#1e293b',
+      background: '#ffffff',
+    },
+    {
+      field: 'description' as const,
+      label: 'Descrição',
+      multiline: true,
+      fontSize: 12,
+      padding: 4,
+      bounds: descBounds,
+      color: '#64748b',
+      background: '#ffffff',
+    },
+  ];
+  (container as any).__inlineEditors = editors;
+  // Default editor (used when neither field nor worldPoint matches a region).
+  (container as any).__inlineEditor = editors[0];
 
   return container;
 };

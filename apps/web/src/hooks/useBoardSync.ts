@@ -14,6 +14,19 @@ export interface UseBoardSyncResult {
 
 const FLUSH_DEBOUNCE_MS = 350;
 
+// Toggle by running `localStorage.setItem('orim:debug', '1')` in the browser
+// console. When on, you'll see every engine→sync hop logged so you can
+// confirm whether the engine you clicked actually has the listeners that
+// would persist your changes.
+const DEBUG_SYNC = (() => {
+  if (typeof window === 'undefined') return false;
+  try {
+    return localStorage.getItem('orim:debug') === '1';
+  } catch {
+    return false;
+  }
+})();
+
 export function useBoardSync(
   boardId: string | undefined,
   engine: CanvasEngine | null,
@@ -67,6 +80,7 @@ export function useBoardSync(
       if (pendingRef.current.size > 0) {
         const map = pendingRef.current;
         pendingRef.current = new Map();
+        if (DEBUG_SYNC) console.info('[sync] flush -> PATCH', { count: map.size, keepalive: options.keepalive });
         const ops = Array.from(map.entries()).map(([id, snapshot]) => {
           const e = snapshot as any;
           // Defensively skip ops we cannot persist correctly. Without a
@@ -174,6 +188,7 @@ export function useBoardSync(
 
     const onUpdated = ({ id, patch }: { id: string; patch: Partial<CanvasElement> }) => {
       if (isRemote()) return;
+      if (DEBUG_SYNC) console.info('[sync] onUpdated', { id, patchKeys: Object.keys(patch) });
       // Final transform/style/etc. patches arrive on pointerup / inline edit
       // commit / property change — they're "settled" events, not mid-drag
       // noise, so drop any pending coalesced transient for this id (the
@@ -224,6 +239,14 @@ export function useBoardSync(
     engine.on('element.transient', onTransient);
     engine.on('element.deleted', onDeleted);
 
+    if (DEBUG_SYNC) {
+      console.info('[sync] listeners attached', {
+        engineId: (engine as any).__engineId,
+        boardId,
+        hasSocket: Boolean(socket),
+      });
+    }
+
     return () => {
       engine.off('element.created', onCreated);
       engine.off('element.updated', onUpdated);
@@ -231,6 +254,14 @@ export function useBoardSync(
       engine.off('element.deleted', onDeleted);
       if (transientTimer !== null) clearTimeout(transientTimer);
       if (timerRef.current) clearTimeout(timerRef.current);
+      if (DEBUG_SYNC) {
+        console.info('[sync] listeners detached', {
+          engineId: (engine as any).__engineId,
+          boardId,
+          pendingCount: pendingRef.current.size,
+          deletedCount: deletedRef.current.size,
+        });
+      }
       flush();
     };
   }, [engine, boardId, socket]);

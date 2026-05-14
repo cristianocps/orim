@@ -1,4 +1,4 @@
-import { Pencil, Palette, Maximize, AlignCenter } from 'lucide-react';
+import { Palette, Maximize, AlignCenter } from 'lucide-react';
 import type { ContextActionProvider, ContextAction } from '../types.js';
 
 const STICKY_COLORS = [
@@ -23,15 +23,10 @@ export const stickyProvider: ContextActionProvider = {
   types: ['sticky_note'],
   actions: ({ primary, store }) => {
     if (!primary || primary.type !== 'sticky_note') return [];
+    // `Edit text` action comes from textFormatProvider — registering another
+    // here would render two pencil buttons in the floating toolbar (different
+    // ids = different actions to the registry).
     const actions: ContextAction[] = [
-      {
-        id: 'sticky.edit',
-        label: 'Editar texto',
-        icon: Pencil,
-        shortcut: 'Enter',
-        group: 'content',
-        run: ({ engine }) => engine.beginInlineEdit(primary.id),
-      },
       {
         id: 'sticky.color',
         label: 'Cor',

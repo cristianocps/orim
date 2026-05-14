@@ -7,7 +7,11 @@
   border: 1px solid var(--border, #e2e8f0);
   border-radius: 12px;
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.15);
-  z-index: 60;
+  /* MUST sit above .inline-editor-backdrop (z-index 200) so formatting
+     buttons remain clickable while inline editing — otherwise the backdrop
+     intercepts the click, commits the edit, and the toolbar action is
+     silently dropped. */
+  z-index: 250;
   animation: floatIn 0.12s ease;
 }
 
@@ -76,7 +80,9 @@
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.15);
   padding: 4px;
   min-width: 180px;
-  z-index: 70;
+  /* Above both the floating-toolbar (250) and the inline-editor backdrop
+     (200) so submenu items are clickable during inline editing. */
+  z-index: 260;
   display: flex;
   flex-direction: column;
   gap: 1px;

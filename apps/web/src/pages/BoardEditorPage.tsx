@@ -128,7 +128,24 @@ export function BoardEditorPage() {
     setCanvasEngine(engine);
     setEngine(engine);
 
-    const onSelect = (info: SelectionInfo) => handleSelectRef.current(info);
+    const onSelect = (info: SelectionInfo) => {
+      // Diagnostic: confirms the engine that fired the event is the same one
+      // useBoardSync wired its persistence listeners to. Mismatched ids here
+      // would mean the StrictMode/HMR engine race struck again and clicks
+      // are reaching an orphan engine.
+      if (typeof window !== 'undefined') {
+        try {
+          if (window.localStorage.getItem('orim:debug') === '1') {
+            console.info('[page] selectionChange', {
+              engineId: (engine as any).__engineId,
+              ids: info.ids,
+              primaryId: info.primaryId,
+            });
+          }
+        } catch { /* ignore */ }
+      }
+      handleSelectRef.current(info);
+    };
     const onContextMenu = (req: ContextMenuRequest) => handleContextMenuRef.current(req);
     const onInlineEditStart = (req: InlineEditRequest) => handleInlineEditStartRef.current(req);
     const onInlineEditEnd = () => handleInlineEditEndRef.current();

@@ -1,4 +1,4 @@
-import { Palette, Pencil, Square, Circle as CircleIcon } from 'lucide-react';
+import { Palette, Square, Circle as CircleIcon } from 'lucide-react';
 import type { ContextActionProvider } from '../types.js';
 
 const FILL_COLORS = [0x3b82f6, 0xef4444, 0x10b981, 0xf59e0b, 0x8b5cf6, 0xd946ef, 0x06b6d4, 0x1e293b, 0xffffff];
@@ -7,17 +7,13 @@ const STROKE_COLORS = [0x1e293b, 0x475569, 0xef4444, 0x10b981, 0x3b82f6, 0xfffff
 export const shapeProvider: ContextActionProvider = {
   id: 'shape',
   types: ['rectangle', 'circle', 'ellipse', 'line', 'arrow'],
+  // The "Edit text" pencil + bold/italic/align/size/color come from
+  // textFormatProvider so any text-bearing element gets the same controls.
+  // This provider focuses on shape-only options (fill, stroke, transform).
   actions: ({ primary, store }) => {
     if (!primary) return [];
     const styleObj = primary.style ?? {};
     return [
-      {
-        id: 'shape.edit',
-        label: 'Adicionar texto',
-        icon: Pencil,
-        group: 'content',
-        run: ({ engine }) => engine.beginInlineEdit(primary.id),
-      },
       {
         id: 'shape.fill',
         label: 'Cor de preenchimento',

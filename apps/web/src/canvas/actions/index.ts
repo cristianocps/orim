@@ -2,6 +2,7 @@ import { contextActionRegistry } from './registry.js';
 import { globalActionsProvider } from './providers/global.js';
 import { stickyProvider } from './providers/sticky.js';
 import { textProvider } from './providers/text.js';
+import { textFormatProvider } from './providers/textFormat.js';
 import { shapeProvider } from './providers/shapes.js';
 import { frameProvider } from './providers/frame.js';
 import { cardProvider } from './providers/card.js';
@@ -28,6 +29,14 @@ export function registerBuiltinProviders() {
   if (registered) return;
   registered = true;
   contextActionRegistry.register(globalActionsProvider);
+  // Register text-format BEFORE the per-type providers. The registry
+  // de-dupes by action `id` keeping the FIRST one seen, so a per-type
+  // provider that wants to override a shared action can do so by
+  // registering before this. Conversely, this ordering guarantees that
+  // every text-bearing element gets the unified bold / italic / size /
+  // color / align controls without each per-type provider having to
+  // re-implement them.
+  contextActionRegistry.register(textFormatProvider);
   contextActionRegistry.register(stickyProvider);
   contextActionRegistry.register(textProvider);
   contextActionRegistry.register(shapeProvider);

@@ -16,6 +16,9 @@ export const renderStickyNote: ElementRenderer = (el) => {
   const fill = (el.style?.fill as number) ?? 0xfde68a;
   const textColor = (el.style?.color as number) ?? pickContrastingColor(fill);
   const fontSize = (el.style?.fontSize as number) ?? 16;
+  const fontWeight = ((el.style?.fontWeight as string) ?? '500') as any;
+  const fontStyle = ((el.style?.fontStyle as 'normal' | 'italic') ?? 'normal');
+  const align = ((el.style?.align as 'left' | 'center' | 'right') ?? 'center');
 
   const shadow = new Graphics();
   shadow.rect(-size.width / 2 + 4, -size.height / 2 + 6, size.width, size.height);
@@ -32,13 +35,20 @@ export const renderStickyNote: ElementRenderer = (el) => {
       text,
       style: new TextStyle({
         fontSize,
+        fontWeight,
+        fontStyle,
         fill: textColor,
         wordWrap: true,
         wordWrapWidth: size.width - 24,
-        align: 'center',
+        align,
       }),
     });
-    txt.anchor.set(0.5);
+    // anchor.x mirrors the alignment so the text block hugs the chosen edge
+    // instead of the renderer always centering it after the fact.
+    const ax = align === 'left' ? 0 : align === 'right' ? 1 : 0.5;
+    txt.anchor.set(ax, 0.5);
+    const offsetX = align === 'left' ? -size.width / 2 + 12 : align === 'right' ? size.width / 2 - 12 : 0;
+    txt.position.set(offsetX, 0);
     container.addChild(txt);
   } else {
     const placeholder = new Text({
@@ -55,12 +65,20 @@ export const renderStickyNote: ElementRenderer = (el) => {
     container.addChild(placeholder);
   }
 
+  // Editor colors mirror the rendered sticky so the overlay blends in
+  // (yellow paper with dark/light contrasting text). Without these the
+  // engine falls back to white-on-slate-900 which clashes visually.
+  const cssBg = `#${fill.toString(16).padStart(6, '0')}`;
+  const cssColor = `#${textColor.toString(16).padStart(6, '0')}`;
+
   (container as any).__inlineEditor = {
     field: 'text',
     multiline: true,
     fontSize,
     padding: 12,
     bounds: { x: -size.width / 2, y: -size.height / 2, width: size.width, height: size.height },
+    color: cssColor,
+    background: cssBg,
   };
 
   return container;

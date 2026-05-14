@@ -116,12 +116,68 @@ export function drawConnector(
     g.stroke(strokeOptions);
   }
 
+  // Draw arrows AFTER stroking so each fill consumes a fresh path. The
+  // tangent at each endpoint is computed from the actual line geometry
+  // (curved/elbow), so the arrow head visually continues the line instead
+  // of pointing along the straight from→to direction (which used to make
+  // arrows look detached or sideways on curved/elbow connectors).
   if (arrowEnd !== 'none') {
-    drawArrowHead(g, from, to, color, opacity, arrowEnd);
+    const endTangent = endTangentFor(from, to, styleType);
+    drawArrowHead(g, to, endTangent, color, opacity, arrowEnd, width);
   }
   if (arrowStart !== 'none') {
-    drawArrowHead(g, to, from, color, opacity, arrowStart);
+    const startTangent = startTangentFor(from, to, styleType);
+    drawArrowHead(g, from, startTangent, color, opacity, arrowStart, width);
   }
+}
+
+/**
+ * Tangent direction (unit vector) at the END of the connector path. For
+ * straight lines this is just (to - from). For elbow we use the last
+ * segment direction. For curved bezier we approximate with the derivative
+ * at t=1 which equals 3 * (P3 - P2) where P2 is the second control point
+ * — sitting at (midX, to.y) here, so the curve approaches `to` horizontally
+ * unless from.x == to.x.
+ */
+function endTangentFor(from: Point, to: Point, style: 'straight' | 'curved' | 'elbow'): Point {
+  if (style === 'straight') return normalize({ x: to.x - from.x, y: to.y - from.y });
+  if (style === 'elbow') {
+    const midX = (from.x + to.x) / 2;
+    // Last segment goes (midX, to.y) → (to.x, to.y). Direction is sign(to.x - midX) on x.
+    const dx = to.x - midX;
+    if (Math.abs(dx) < 1e-3) return { x: 0, y: to.y >= from.y ? 1 : -1 };
+    return { x: dx > 0 ? 1 : -1, y: 0 };
+  }
+  // curved: derivative at t=1 of bezier with cps (midX, from.y), (midX, to.y)
+  // is 3 * ((to.x, to.y) - (midX, to.y)) = (3*(to.x - midX), 0).
+  const midX = (from.x + to.x) / 2;
+  const dx = to.x - midX;
+  if (Math.abs(dx) < 1e-3) return { x: 0, y: to.y >= from.y ? 1 : -1 };
+  return { x: dx > 0 ? 1 : -1, y: 0 };
+}
+
+function startTangentFor(from: Point, to: Point, style: 'straight' | 'curved' | 'elbow'): Point {
+  if (style === 'straight') return normalize({ x: from.x - to.x, y: from.y - to.y });
+  if (style === 'elbow') {
+    const midX = (from.x + to.x) / 2;
+    // First segment goes (from.x, from.y) → (midX, from.y). Reverse direction
+    // points the start arrow tip away from the next segment.
+    const dx = from.x - midX;
+    if (Math.abs(dx) < 1e-3) return { x: 0, y: from.y >= to.y ? 1 : -1 };
+    return { x: dx > 0 ? 1 : -1, y: 0 };
+  }
+  // curved: derivative at t=0 is 3 * ((midX, from.y) - (from.x, from.y))
+  // = (3*(midX - from.x), 0). Reverse to point the arrowhead OUTWARD.
+  const midX = (from.x + to.x) / 2;
+  const dx = from.x - midX;
+  if (Math.abs(dx) < 1e-3) return { x: 0, y: from.y >= to.y ? 1 : -1 };
+  return { x: dx > 0 ? 1 : -1, y: 0 };
+}
+
+function normalize(v: Point): Point {
+  const m = Math.hypot(v.x, v.y);
+  if (m < 1e-6) return { x: 1, y: 0 };
+  return { x: v.x / m, y: v.y / m };
 }
 
 function drawPath(g: Graphics, from: Point, to: Point, style: 'straight' | 'curved' | 'elbow') {
@@ -214,43 +270,63 @@ function samplePath(
   return out;
 }
 
+/**
+ * Draw an arrow head with its tip at `tip` pointing in the direction of
+ * `tangent` (unit vector, points OUT of the line at that endpoint).
+ *
+ * `strokeWidth` is the connector's stroke width. The arrow scales with it
+ * so that a 1px line gets a small head and a 6px line gets a noticeably
+ * larger one — without scaling, fat lines collide visually with the
+ * triangle base.
+ */
 function drawArrowHead(
   g: Graphics,
-  from: Point,
-  to: Point,
+  tip: Point,
+  tangent: Point,
   color: number,
   opacity: number,
   style: ConnectorArrowStyle,
+  strokeWidth: number,
 ) {
-  const angle = Math.atan2(to.y - from.y, to.x - from.x);
-  const size = 10;
+  const angle = Math.atan2(tangent.y, tangent.x);
+  // Base size 10, grow ~3px per extra stroke pixel beyond 1.
+  const size = 10 + Math.max(0, strokeWidth - 1) * 3;
 
   if (style === 'triangle') {
-    const ax = to.x - size * Math.cos(angle - Math.PI / 6);
-    const ay = to.y - size * Math.sin(angle - Math.PI / 6);
-    const bx = to.x - size * Math.cos(angle + Math.PI / 6);
-    const by = to.y - size * Math.sin(angle + Math.PI / 6);
-    g.moveTo(to.x, to.y);
+    // The tip sits at the endpoint. Two base corners are `size` back along
+    // the tangent, splayed ±30° so the triangle has a visible width.
+    const ax = tip.x - size * Math.cos(angle - Math.PI / 6);
+    const ay = tip.y - size * Math.sin(angle - Math.PI / 6);
+    const bx = tip.x - size * Math.cos(angle + Math.PI / 6);
+    const by = tip.y - size * Math.sin(angle + Math.PI / 6);
+    g.moveTo(tip.x, tip.y);
     g.lineTo(ax, ay);
     g.lineTo(bx, by);
-    g.lineTo(to.x, to.y);
+    g.closePath();
     g.fill({ color, alpha: opacity });
+    // Stroke the outline too so the head looks crisp at low zoom levels.
+    g.stroke({ width: 1, color, alpha: opacity });
   } else if (style === 'diamond') {
-    const tipX = to.x;
-    const tipY = to.y;
-    const baseX = to.x - size * Math.cos(angle);
-    const baseY = to.y - size * Math.sin(angle);
+    // Diamond: tip → right-side mid → tail (2*size back) → left-side mid → close
+    const halfBackX = tip.x - size * Math.cos(angle);
+    const halfBackY = tip.y - size * Math.sin(angle);
     const sideX = (size / 2) * Math.cos(angle - Math.PI / 2);
     const sideY = (size / 2) * Math.sin(angle - Math.PI / 2);
-    g.moveTo(tipX, tipY);
-    g.lineTo(baseX + sideX, baseY + sideY);
-    g.lineTo(to.x - 2 * size * Math.cos(angle), to.y - 2 * size * Math.sin(angle));
-    g.lineTo(baseX - sideX, baseY - sideY);
-    g.lineTo(tipX, tipY);
+    const tailX = tip.x - 2 * size * Math.cos(angle);
+    const tailY = tip.y - 2 * size * Math.sin(angle);
+    g.moveTo(tip.x, tip.y);
+    g.lineTo(halfBackX + sideX, halfBackY + sideY);
+    g.lineTo(tailX, tailY);
+    g.lineTo(halfBackX - sideX, halfBackY - sideY);
+    g.closePath();
     g.fill({ color, alpha: opacity });
+    g.stroke({ width: 1, color, alpha: opacity });
   } else if (style === 'circle') {
-    g.circle(to.x - (size / 2) * Math.cos(angle), to.y - (size / 2) * Math.sin(angle), size / 2);
+    const cx = tip.x - (size / 2) * Math.cos(angle);
+    const cy = tip.y - (size / 2) * Math.sin(angle);
+    g.circle(cx, cy, size / 2);
     g.fill({ color, alpha: opacity });
+    g.stroke({ width: 1, color, alpha: opacity });
   }
 }
 

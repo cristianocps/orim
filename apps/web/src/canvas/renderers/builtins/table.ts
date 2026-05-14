@@ -100,5 +100,70 @@ export const renderTable: ElementRenderer = (el) => {
     { id: 'bottom-left', nx: -0.5, ny: 0.5 },
   ];
 
+  // One inline editor per cell. The engine picks based on dblclick world
+  // position; the field id encodes row/col so endInlineEdit can patch the
+  // correct nested array via `applyValue`. Without `applyValue`, writing
+  // back would clobber the entire `cells` field with `{cell_r_c: '...'}`.
+  const editors = [] as {
+    field: string;
+    label: string;
+    multiline: boolean;
+    fontSize: number;
+    padding: number;
+    bounds: { x: number; y: number; width: number; height: number };
+    getValue: () => string;
+    applyValue: (v: string) => Partial<typeof el>;
+    color: string;
+    background: string;
+  }[];
+  {
+    let rowOff = 0;
+    for (let r = 0; r < rows; r++) {
+      let colOff = startX;
+      for (let c = 0; c < cols; c++) {
+        const cw = colWidths[c];
+        const rh = rowHeights[r];
+        const cellBgColor = (cells as any[])[r]?.[c]?.backgroundColor as number | undefined;
+        const cellBg = cellBgColor !== undefined
+          ? `#${cellBgColor.toString(16).padStart(6, '0')}`
+          : (r === 0 && headerRow ? '#f1f5f9' : '#ffffff');
+        const cellTextColor = r === 0 && headerRow ? '#475569' : '#1e293b';
+        editors.push({
+          field: `cell_${r}_${c}`,
+          label: `Célula L${r + 1}C${c + 1}`,
+          multiline: true,
+          fontSize: 12,
+          padding: 4,
+          bounds: { x: colOff, y: startY + rowOff, width: cw, height: rh },
+          color: cellTextColor,
+          background: cellBg,
+          getValue: () => String(((cells as any[])[r]?.[c]?.text) ?? ''),
+          applyValue: (v: string) => {
+            // Clone the full cells matrix and replace the single cell. The
+            // store / sync layer treats `cells` as a plain JSON value, so a
+            // shallow patch with the full new matrix is the safest write.
+            const next = ((cells as any[]) ?? []).map((row, ri) =>
+              ri === r
+                ? Array.from({ length: cols }, (_, ci) => {
+                    if (ci !== c) return row?.[ci] ?? { text: '' };
+                    return { ...(row?.[ci] ?? {}), text: v };
+                  })
+                : Array.from({ length: cols }, (_, ci) => row?.[ci] ?? { text: '' }),
+            );
+            // Make sure the target row exists when matrix is sparse.
+            while (next.length <= r) next.push(Array.from({ length: cols }, () => ({ text: '' })));
+            return { cells: next } as any;
+          },
+        });
+        colOff += cw;
+      }
+      rowOff += rowHeights[r];
+    }
+  }
+  (container as any).__inlineEditors = editors;
+  // Default editor — first cell — used when no specific cell matches the
+  // double-click point (e.g. clicking on the table border).
+  (container as any).__inlineEditor = editors[0];
+
   return container;
 };
